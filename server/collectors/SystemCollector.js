@@ -260,6 +260,10 @@ export class SystemCollector {
       total = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
     }
 
+    // GB10 fallback: if nvidia-smi memory + compute-apps both fail, derive used from meminfo
+    if ((used == null || used === 0) && memTotalMB > 0 && availMB > 0) {
+      used = memTotalMB - availMB;
+    }
     const usedMB = Math.round(used || 0);
     const totalMB = Math.round(total || 0);
     const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
@@ -1224,7 +1228,11 @@ export class SystemCollector {
         });
       }
     }
-    return this._readHostFile(`/proc/net/${relPath}`);
+    const directPath = `/proc/net/${relPath}`;
+    if (fs.existsSync(directPath)) {
+      return fs.readFileSync(directPath, "utf-8");
+    }
+    throw new Error(`Cannot read ${directPath}: file not found`);
   }
 
   /** Lightweight liveness for local Sparks. */

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { LlmMetrics } from "../../api/types";
+import type { LlmMetrics, SlotTelemetry } from "../../api/types";
 import { updateLlmPort } from "../../api/client";
-import { Sparkline } from "../ui/Sparkline";
 import { Panel } from "../ui/Panel";
+import { TelemetryChart, type ChartSeries } from "../ui/TelemetryChart";
 import { BotIcon, GearIcon, InfoIcon } from "../ui/icons";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { BenchmarkDialog } from "./BenchmarkDialog";
@@ -17,22 +17,42 @@ interface LlmPanelProps {
 
 const VLLM_METRIC_INFO = {
   kvCache:
-    "Fraction of the engine’s KV cache memory currently in use (0–100%). High values (≥80%) mean little room for new or long contexts and often lead to queuing or preemptions.",
+    "Fraction of the engine's KV cache memory currently in use (0–100%). High values (≥80%) mean little room for new or long contexts and often lead to queuing or preemptions.",
   requests:
     "Run = requests actively generating on the GPU. Wait = accepted but not yet scheduled (capacity or constraints). Growing wait with high KV cache usually means the server is overloaded.",
   ttftP95:
-    "95th percentile time-to-first-token from vLLM’s history of requests: how long “slow” requests wait until the first output token. Spikes mean queueing, long prefills, or cold paths—not average decode speed.",
+    "95th percentile time-to-first-token from vLLM's history of requests: how long "slow" requests wait until the first output token. Spikes mean queueing, long prefills, or cold paths—not average decode speed.",
   preempts:
     "Cumulative times the engine paused a running request to free KV cache for others. Rising under load signals memory pressure; zero is normal when the server is comfortable.",
   prefixCache:
     "Lifetime fraction of prefix-cache lookups that hit (hits ÷ queries). Higher means more prompt reuse and less prefill work; — when the series is missing or unused.",
   e2eP95:
-    "95th percentile end-to-end request latency from vLLM’s history: arrival until the request finishes. Includes queue wait, prefill, and decode—not just token generation speed.",
+    "95th percentile end-to-end request latency from vLLM's history: arrival until the request finishes. Includes queue wait, prefill, and decode—not just token generation speed.",
   itlP95:
-    "95th percentile inter-token latency (time between successive output tokens) from vLLM’s history. Spikes mean decode stalls or contention; lower is smoother streaming.",
+    "95th percentile inter-token latency (time between successive output tokens) from vLLM's history. Spikes mean decode stalls or contention; lower is smoother streaming.",
   mtpAccept:
     "Lifetime speculative / MTP acceptance rate (accepted draft tokens ÷ drafted tokens). Higher means speculative decoding is paying off; — when speculation is off or unused.",
 } as const;
+
+const HISTORY = 60; // last 60 samples (~2 min at 2s polling)
+
+interface History {
+  genTps: number[];
+  prefillTps: number[];
+  ttft: number[];
+  e2e: number[];
+  // for trend arrows
+  prevE2e?: number;
+  prevTtft?: number;
+  prevTokensPerReq?: number;
+  prevTpsPerSlot?: number;
+}
+
+function pushSample(arr: number[], v: number, max = HISTORY): number[] {
+  const next = arr.length >= max ? arr.slice(arr.length - max + 1) : arr.slice();
+  next.push(v);
+  return next;
+}
 
 /** Backend badge — neutral surfaces with a single accent dot. No blue/purple. */
 function BackendBadge({ backend }: { backend: string | null }) {
@@ -59,7 +79,7 @@ function MetricInfoTip({
   text,
   openId,
   setOpenId,
-  /** Anchor tooltip to the right so edge columns don’t clip off-screen */
+  /** Anchor tooltip to the right so edge columns don't clip off-screen */
   align = "left",
 }: {
   id: string;
@@ -125,9 +145,140 @@ function MetricInfoTip({
   );
 }
 
+function fmtNum(v: number | undefined | null, digits = 1, suffix = ""): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${v.toFixed(digits)}${suffix}`;
+}
+
+function fmtInt(v: number | undefined | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return Math.round(v).toLocaleString();
+}
+
+function pct(v: number | undefined | null, digits = 0): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(digits)}%`;
+}
+
+/** Color for MTP acceptance: green >70%, yellow 50-70%, red <50%. */
+function mtpColor(rate: number | undefined | null): string {
+  if (rate == null) return "var(--color-muted)";
+  const p = rate * 100;
+  if (p > 70) return "var(--color-success)";
+  if (p >= 50) return "var(--color-warning)";
+  return "var(--color-danger)";
+}
+
+function latencyColor(seconds: number, fast: number, slow: number): string {
+  if (!Number.isFinite(seconds)) return "var(--color-muted)";
+  if (seconds <= fast) return "var(--color-success)";
+  if (seconds >= slow) return "var(--color-danger)";
+  return "var(--color-warning)";
+}
+
+function tpsColor(tps: number): string {
+  if (!Number.isFinite(tps) || tps <= 0) return "var(--color-muted)";
+  if (tps >= 40) return "var(--color-success)";
+  if (tps >= 15) return "var(--color-warning)";
+  return "var(--color-danger)";
+}
+
+/** Compact stat card for the live stats row. */
+function StatCard({
+  label,
+  value,
+  sub,
+  valueColor,
+  bar,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  valueColor?: string;
+  bar?: { pct: number; color: string };
+}) {
+  return (
+    <div className="llm-stat-card">
+      <div className="llm-stat-label">{label}</div>
+      <div
+        className="llm-stat-value font-tabular"
+        style={valueColor ? { color: valueColor } : undefined}
+      >
+        {value}
+      </div>
+      {sub && <div className="llm-stat-sub font-tabular">{sub}</div>}
+      {bar && (
+        <div className="llm-stat-bar">
+          <div
+            className="llm-stat-bar-fill"
+            style={{ width: `${Math.max(0, Math.min(100, bar.pct))}%`, background: bar.color }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TrendArrow({ current, previous, lowerIsBetter = false }: { current?: number; previous?: number; lowerIsBetter?: boolean }) {
+  if (current == null || previous == null || !Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) {
+    return <span className="llm-trend-neutral">─</span>;
+  }
+  const delta = current - previous;
+  const epsilon = Math.abs(previous) * 0.001 || 1e-6;
+  if (Math.abs(delta) < epsilon) {
+    return <span className="llm-trend-neutral">─</span>;
+  }
+  const up = delta > 0;
+  const good = lowerIsBetter ? !up : up;
+  return (
+    <span className={good ? "llm-trend-up" : "llm-trend-down"} aria-label={up ? "up" : "down"}>
+      {up ? "▲" : "▼"}
+    </span>
+  );
+}
+
+/** Circular gauge drawn with inline SVG. */
+function AcceptanceGauge({ rate }: { rate: number | null | undefined }) {
+  const r = 34;
+  const c = 2 * Math.PI * r;
+  const pctVal = rate == null ? 0 : Math.max(0, Math.min(1, rate));
+  const dash = c * pctVal;
+  const color = mtpColor(rate);
+  const label = rate == null ? "—" : `${Math.round(rate * 100)}%`;
+  return (
+    <div className="llm-gauge">
+      <svg width="92" height="92" viewBox="0 0 92 92">
+        <circle cx="46" cy="46" r={r} fill="none" stroke="var(--color-border)" strokeWidth="7" />
+        <circle
+          cx="46"
+          cy="46"
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth="7"
+          strokeLinecap="round"
+          strokeDasharray={`${dash} ${c}`}
+          transform="rotate(-90 46 46)"
+          style={{ transition: "stroke-dasharray 0.4s ease, stroke 0.4s ease" }}
+        />
+        <text x="46" y="50" textAnchor="middle" className="llm-gauge-text font-tabular" fill={color}>
+          {label}
+        </text>
+      </svg>
+      <div className="llm-gauge-caption">Acceptance</div>
+    </div>
+  );
+}
+
 export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: LlmPanelProps) {
   // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
   const genHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.tps`);
+  const [history, setHistory] = useState<History>({
+    genTps: [],
+    prefillTps: [],
+    ttft: [],
+    e2e: [],
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [saving, setSaving] = useState(false);
@@ -157,6 +308,25 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
   useEffect(() => {
     if (!showSettings) setPortDraft(String(llmPort));
   }, [llmPort, showSettings]);
+
+  // Append new telemetry samples whenever the upstream metrics tick.
+  useEffect(() => {
+    if (!llm || !available) return;
+    const gen = llm.generationTps ?? 0;
+    const pre = llm.prefillTps ?? 0;
+    const ttft = llm.ttft ?? NaN;
+    const e2e = llm.e2eLatency ?? NaN;
+    setHistory((prev) => ({
+      genTps: pushSample(prev.genTps, gen),
+      prefillTps: pushSample(prev.prefillTps, pre),
+      ttft: pushSample(prev.ttft, ttft),
+      e2e: pushSample(prev.e2e, e2e),
+      prevE2e: prev.e2e.length ? prev.e2e[prev.e2e.length - 1] : undefined,
+      prevTtft: prev.ttft.length ? prev.ttft[prev.ttft.length - 1] : undefined,
+      prevTokensPerReq: prev.prevTokensPerReq === undefined ? llm.genTokensPerReq : prev.prevTokensPerReq,
+      prevTpsPerSlot: prev.prevTpsPerSlot === undefined ? llm.rollingAvgTpsPerSlot : prev.prevTpsPerSlot,
+    }));
+  }, [llm, available]);
 
   const parsedPort = (() => {
     const n = parseInt(portDraft, 10);
@@ -188,6 +358,42 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
       setSaving(false);
     }
   };
+
+  const genSeries: ChartSeries = {
+    label: "gen tok/s",
+    color: "var(--color-success)",
+    data: history.genTps,
+    area: true,
+  };
+  const preSeries: ChartSeries = {
+    label: "prefill tok/s",
+    color: "var(--color-accent)",
+    data: history.prefillTps,
+    area: false,
+  };
+  const ttftSeries: ChartSeries = {
+    label: "TTFT",
+    color: "var(--color-warning)",
+    data: history.ttft,
+    area: false,
+  };
+  const e2eSeries: ChartSeries = {
+    label: "E2E",
+    color: "var(--color-danger)",
+    data: history.e2e,
+    area: false,
+  };
+
+  const runningSlots = llm?.runningSlots ?? llm?.slotsActive ?? 0;
+  const waitingSlots = llm?.waitingSlots ?? 0;
+  const kvUsage = llm?.kvCacheUsage ?? null;
+  const genTps = llm?.generationTps ?? 0;
+  const mtpRate = llm?.mtpAcceptanceRate ?? null;
+  const prefixHit = llm?.prefixCacheHitRate ?? null;
+  const slots: SlotTelemetry[] = llm?.slots ?? [];
+  const perPos: number[] = llm?.perPositionAcceptance ?? [];
+  const mtpAccepted = llm?.mtpAcceptedTokens ?? null;
+  const mtpDrafted = llm?.mtpDraftedTokens ?? null;
 
   return (
     <Panel
@@ -283,112 +489,243 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
           </div>
         </div>
       ) : !available ? (
-        <div className="flex items-center gap-2 py-1">
-          <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-          <p className="text-xs text-muted">No model loaded on :{llmPort}</p>
+        <div className="space-y-4">
+          {/* Header bar even when down — shows port + red health */}
+          <div className="llm-header-bar llm-header-down">
+            <div className="llm-health">
+              <span className="llm-health-dot llm-health-down" />
+              <span className="llm-health-text">Offline</span>
+            </div>
+            <div className="llm-header-meta">
+              <span className="llm-header-field">
+                <span className="llm-header-key">Model</span>
+                <span className="llm-header-val">—</span>
+              </span>
+              <span className="llm-header-field">
+                <span className="llm-header-key">Backend</span>
+                <span className="llm-header-val">—</span>
+              </span>
+              <span className="llm-header-field">
+                <span className="llm-header-key">Context</span>
+                <span className="llm-header-val">—</span>
+              </span>
+              <span className="llm-header-field">
+                <span className="llm-header-key">Port</span>
+                <span className="llm-header-val font-tabular">:{llmPort}</span>
+              </span>
+            </div>
+          </div>
+          <p className="text-xs text-muted">
+            No model loaded on :{llmPort}
+            {llm?.error ? ` — ${llm.error}` : ""}
+          </p>
         </div>
       ) : (
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <BackendBadge backend={llm?.backend ?? null} />
-            {llm?.modelId && (
-              <span
-                className="min-w-0 flex-1 truncate text-xs text-text"
-                title={llm.modelId}
-              >
-                {llm.modelId}
+        <div className="llm-dashboard space-y-4">
+          {/* ── 1. Header bar ─────────────────────────────── */}
+          <div className="llm-header-bar">
+            <div className="llm-health">
+              <span className={`llm-health-dot ${runningSlots > 0 ? "llm-health-up" : "llm-health-idle"}`} />
+              <span className="llm-health-text">
+                {runningSlots > 0 ? "Serving" : "Ready"}
               </span>
-            )}
-            <span className="shrink-0 font-tabular text-[10px] text-muted">:{llmPort}</span>
+            </div>
+            <div className="llm-header-meta">
+              <span className="llm-header-field">
+                <span className="llm-header-key">Model</span>
+                <span className="llm-header-val truncate" title={llm?.modelId ?? ""}>
+                  {llm?.modelId || "—"}
+                </span>
+              </span>
+              <span className="llm-header-field">
+                <span className="llm-header-key">Backend</span>
+                <span className="llm-header-val">
+                  <BackendBadge backend={llm?.backend ?? null} />
+                </span>
+              </span>
+              <span className="llm-header-field">
+                <span className="llm-header-key">Context</span>
+                <span className="llm-header-val font-tabular">
+                  {llm?.contextLength ? llm.contextLength.toLocaleString() : "—"}
+                </span>
+              </span>
+              <span className="llm-header-field">
+                <span className="llm-header-key">Port</span>
+                <span className="llm-header-val font-tabular">:{llmPort}</span>
+              </span>
+            </div>
           </div>
-          {llm?.modelPath && (
-            <div className="-mt-1.5 truncate text-[10px] text-muted" title={llm.modelPath}>
-              {llm.modelPath}
+
+          {/* ── 2. Live stats row ─────────────────────────── */}
+          <div className="llm-stat-grid">
+            <StatCard
+              label="Running slots"
+              value={fmtInt(runningSlots)}
+              sub={llm?.slotsTotal ? `of ${llm.slotsTotal}` : undefined}
+              valueColor={runningSlots > 0 ? "var(--color-success)" : "var(--color-muted)"}
+            />
+            <StatCard
+              label="Waiting slots"
+              value={fmtInt(waitingSlots)}
+              valueColor={waitingSlots > 0 ? "var(--color-danger)" : "var(--color-muted)"}
+            />
+            <StatCard
+              label="KV cache"
+              value={pct(kvUsage, 0)}
+              valueColor={kvUsage != null && kvUsage > 0.85 ? "var(--color-danger)" : kvUsage != null && kvUsage > 0.6 ? "var(--color-warning)" : "var(--color-text)"}
+              bar={kvUsage != null ? { pct: kvUsage * 100, color: kvUsage > 0.85 ? "var(--color-danger)" : kvUsage > 0.6 ? "var(--color-warning)" : "var(--color-accent)" } : undefined}
+            />
+            <StatCard
+              label="Gen tok/s"
+              value={fmtNum(genTps, 1)}
+              sub={fmtNum(llm?.prefillTps, 1, " prefill")}
+              valueColor={tpsColor(genTps)}
+            />
+            <StatCard
+              label="MTP accept"
+              value={pct(mtpRate, 0)}
+              valueColor={mtpColor(mtpRate)}
+              bar={mtpRate != null ? { pct: mtpRate * 100, color: mtpColor(mtpRate) } : undefined}
+            />
+            <StatCard
+              label="Prefix cache"
+              value={pct(prefixHit, 0)}
+              valueColor={prefixHit != null ? "var(--color-accent)" : "var(--color-muted)"}
+              bar={prefixHit != null ? { pct: prefixHit * 100, color: "var(--color-accent)" } : undefined}
+            />
+          </div>
+
+          {/* ── 3. Real-time t/s chart ────────────────────── */}
+          <div className="llm-chart-block">
+            <div className="llm-chart-title">Throughput <span className="llm-chart-sub">tok/s · last 60 samples</span></div>
+            <TelemetryChart
+              series={[genSeries, preSeries]}
+              maxPoints={HISTORY}
+              height={170}
+              yUnit=""
+              yMin={0}
+            />
+          </div>
+
+          {/* ── 4. TTFT + E2E latency chart ───────────────── */}
+          <div className="llm-chart-block">
+            <div className="llm-chart-title">Latency <span className="llm-chart-sub">seconds · TTFT + E2E</span></div>
+            <TelemetryChart
+              series={[ttftSeries, e2eSeries]}
+              maxPoints={HISTORY}
+              height={150}
+              yUnit="s"
+              yMin={0}
+            />
+          </div>
+
+          {/* ── 5. Per-slot table ─────────────────────────── */}
+          {slots.length > 0 && (
+            <div className="llm-chart-block">
+              <div className="llm-chart-title">Per-slot <span className="llm-chart-sub">{slots.length} active</span></div>
+              <div className="llm-slot-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Slot</th>
+                      <th>Context</th>
+                      <th>t/s</th>
+                      <th>TTFT</th>
+                      <th>RTT</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {slots.map((s) => (
+                      <tr key={s.id}>
+                        <td className="font-tabular">#{s.id}</td>
+                        <td className="font-tabular">{s.contextLength.toLocaleString()}</td>
+                        <td className="font-tabular" style={{ color: tpsColor(s.tps) }}>{fmtNum(s.tps, 1)}</td>
+                        <td className="font-tabular" style={{ color: latencyColor(s.ttft, 0.2, 1.0) }}>{fmtNum(s.ttft, 3, "s")}</td>
+                        <td className="font-tabular" style={{ color: latencyColor(s.roundTrip, 0.5, 3.0) }}>{fmtNum(s.roundTrip, 3, "s")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted">Generation tok/s</span>
-            <div className="flex items-center gap-2">
-              <Sparkline data={genHistory} color="var(--color-accent)" height={24} />
-              <span className="font-tabular text-sm font-semibold text-accent">
-                {generationTps.toFixed(1)}
-              </span>
+          {/* ── 6. Moving averages + 7. MTP panel ─────────── */}
+          <div className="llm-bottom-grid">
+            <div className="llm-chart-block">
+              <div className="llm-chart-title">Moving averages <span className="llm-chart-sub">last 10 inferences</span></div>
+              <div className="llm-ma-grid">
+                <div className="llm-ma-card">
+                  <div className="llm-ma-label">Avg E2E</div>
+                  <div className="llm-ma-value font-tabular" style={{ color: latencyColor(llm?.rollingAvgE2e ?? NaN, 0.5, 3.0) }}>
+                    {fmtNum(llm?.rollingAvgE2e, 3, "s")}
+                  </div>
+                  <TrendArrow current={llm?.rollingAvgE2e} previous={history.prevE2e} lowerIsBetter />
+                </div>
+                <div className="llm-ma-card">
+                  <div className="llm-ma-label">Avg TTFT</div>
+                  <div className="llm-ma-value font-tabular" style={{ color: latencyColor(llm?.rollingAvgTtft ?? NaN, 0.2, 1.0) }}>
+                    {fmtNum(llm?.rollingAvgTtft, 3, "s")}
+                  </div>
+                  <TrendArrow current={llm?.rollingAvgTtft} previous={history.prevTtft} lowerIsBetter />
+                </div>
+                <div className="llm-ma-card">
+                  <div className="llm-ma-label">Avg tokens/req</div>
+                  <div className="llm-ma-value font-tabular">{fmtInt(llm?.rollingAvgTokensPerReq)}</div>
+                  <TrendArrow current={llm?.rollingAvgTokensPerReq} previous={history.prevTokensPerReq} />
+                </div>
+                <div className="llm-ma-card">
+                  <div className="llm-ma-label">Avg tok/s · slot</div>
+                  <div className="llm-ma-value font-tabular" style={{ color: tpsColor(llm?.rollingAvgTpsPerSlot ?? 0) }}>
+                    {fmtNum(llm?.rollingAvgTpsPerSlot, 1)}
+                  </div>
+                  <TrendArrow current={llm?.rollingAvgTpsPerSlot} previous={history.prevTpsPerSlot} />
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div className="grid grid-cols-4 gap-2 border-t border-border pt-3">
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
-              <div className="font-tabular text-sm text-text">
-                {(llm?.slotsTotal ?? 0) > 0
-                  ? `${llm?.slotsActive ?? 0} / ${llm?.slotsTotal ?? 0}`
-                  : (llm?.slotsActive ?? 0) > 0
-                    ? `${llm?.slotsActive} running`
-                    : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Context</div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.contextLength ? llm.contextLength.toLocaleString() : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted">
-                <span>Engine</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEngineInfoOpen((v) => {
-                      if (!v) startEngineInfoTimer();
-                      return !v;
-                    });
-                  }}
-                  onMouseEnter={clearEngineInfoTimer}
-                  onMouseLeave={startEngineInfoTimer}
-                  className="relative cursor-pointer opacity-60 hover:opacity-100"
-                  aria-label="Engine state info"
-                >
-                  <svg
-                    width="10"
-                    height="10"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M12 16v-4" />
-                    <path d="M12 8h.01" />
-                  </svg>
-                  {engineInfoOpen && (
-                    <div
-                      onMouseEnter={clearEngineInfoTimer}
-                      onMouseLeave={startEngineInfoTimer}
-                      className="absolute left-0 top-full z-10 mt-1 w-56 rounded-md border border-border bg-surface-elevated px-3 py-2 text-left text-[11px] font-normal normal-case text-text shadow-lg"
-                    >
-                      Active = processing or ready for requests. Sleeping = idle, GPU memory freed until next request.
+            <div className="llm-chart-block">
+              <div className="llm-chart-title">Speculative decode <span className="llm-chart-sub">MTP</span></div>
+              <div className="llm-mtp-body">
+                <AcceptanceGauge rate={mtpRate} />
+                <div className="llm-mtp-right">
+                  <div className="llm-mtp-counters">
+                    <div className="llm-mtp-counter">
+                      <div className="llm-mtp-counter-label">Accepted</div>
+                      <div className="llm-mtp-counter-val font-tabular" style={{ color: "var(--color-success)" }}>
+                        {fmtInt(mtpAccepted)}
+                      </div>
+                    </div>
+                    <div className="llm-mtp-counter">
+                      <div className="llm-mtp-counter-label">Drafted</div>
+                      <div className="llm-mtp-counter-val font-tabular">
+                        {fmtInt(mtpDrafted)}
+                      </div>
+                    </div>
+                  </div>
+                  {perPos.length > 0 && (
+                    <div className="llm-mtp-positions">
+                      <div className="llm-mtp-pos-label">Per-position acceptance</div>
+                      <div className="llm-mtp-pos-bars">
+                        {perPos.slice(0, 4).map((p, i) => (
+                          <div key={i} className="llm-mtp-pos-bar">
+                            <div className="llm-mtp-pos-bar-track">
+                              <div
+                                className="llm-mtp-pos-bar-fill"
+                                style={{
+                                  width: `${Math.max(0, Math.min(100, p * 100))}%`,
+                                  background: mtpColor(p),
+                                }}
+                              />
+                            </div>
+                            <div className="llm-mtp-pos-bar-label font-tabular">pos{i}</div>
+                            <div className="llm-mtp-pos-bar-val font-tabular">{pct(p, 0)}</div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
-                </button>
-              </div>
-              <div className="font-tabular text-sm text-text">
-                {llm?.gpuMemoryUtilization != null
-                  ? llm.gpuMemoryUtilization === 0
-                    ? "Sleeping"
-                    : "Active"
-                  : "—"}
-              </div>
-            </div>
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Total Generated</div>
-              <div className="font-tabular text-sm text-text">
-                {llm && llm.totalOutputTokens > 0
-                  ? llm.totalOutputTokens.toLocaleString()
-                  : "—"}
+                </div>
               </div>
             </div>
           </div>

@@ -18,3 +18,7 @@ tetris.html
 HANDOFF.md
 handoff.md
 test/
+*.bak
+*.bak.*
+dist_backup/
+config/sparks.json.bak
