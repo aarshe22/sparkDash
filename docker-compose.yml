@@ -12,9 +12,12 @@ services:
     ports:
       - "5555:5555"
     privileged: true
-    # Share host PID namespace so nvidia-smi compute-apps sees GPU processes
+# Share host PID namespace so nvidia-smi compute-apps sees GPU processes
     # (otherwise local VRAM falls back to minute-old config/gpu-memory.json).
     pid: host
+# Allow the container to reach host-bound services (e.g. medgemma on :8000)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Live server code — edits apply after --watch reloads the process
       - ./server:/app/server

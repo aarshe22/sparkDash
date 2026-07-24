@@ -13,7 +13,7 @@ export class LlmProbe {
   constructor(spark, port = 8888) {
     this.spark = spark;
     this.port = port;
-    this.baseUrl = `http://${spark.lanIp}:${port}`;
+this.baseUrl = `http://${spark.isLocal ? (process.env.LLM_HOST || "localhost") : spark.lanIp}:${port}`;
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | null
@@ -64,7 +64,7 @@ export class LlmProbe {
     if (Number.isInteger(next) && next >= 1 && next <= 65535) {
       this.port = next;
     }
-    this.baseUrl = `http://${this.spark.lanIp}:${this.port}`;
+this.baseUrl = `http://${this.spark.isLocal ? (process.env.LLM_HOST || "localhost") : this.spark.lanIp}:${this.port}`;
     if (this.baseUrl !== prevUrl) {
       this._resetDetection();
       this._lastDetectAt = 0;
@@ -74,7 +74,9 @@ export class LlmProbe {
 
   /** Probe the LLM server and return a snapshot. */
   async probe() {
+    this._probeT0 = Date.now();
     try {
+      console.log(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} probe() start url=${this.baseUrl}`);
       const shouldDetect =
         this.serverIsOpenAI === null ||
         Date.now() - this._lastDetectAt > REDETECT_INTERVAL_MS;
@@ -105,10 +107,12 @@ export class LlmProbe {
   _noteSuccess() {
     this._consecutiveFailures = 0;
     this.error = null;
+    console.log(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} OK backend=${this.backendType} model=${this.modelId} slotsActive=${this.slotsActive} genTps=${this.generationTps} prefillTps=${this.prefillTps} took=${Date.now()-this._probeT0}ms`);
   }
 
   _noteFailure(message) {
     this.error = message;
+    console.warn(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} failure: ${message} (consecutive=${this._consecutiveFailures})`);
     this._consecutiveFailures += 1;
     if (this._consecutiveFailures >= FAIL_RESET_THRESHOLD) {
       this._resetDetection();
@@ -142,6 +146,7 @@ export class LlmProbe {
 
   // ─── Server type detection ───────────────────────────────
   async _detectServerType() {
+    console.log(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} _detectServerType()`);
     const slotUrl = `${this.baseUrl}/slots`;
     try {
       const slotRes = await this._fetch(slotUrl);
@@ -167,6 +172,7 @@ export class LlmProbe {
 
     this.serverIsOpenAI = null;
     this.backendType = null;
+    console.log(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} detection FAILED (no /slots, no /v1/models)`);
   }
 
   // ─── OpenAI-compatible path (vLLM/sglang) ────────────────
@@ -221,10 +227,44 @@ export class LlmProbe {
       try {
         const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
         if (metricsRes.ok) {
-          const txt = await metricsRes.text();
+metricsText = await metricsRes.text();
+          console.log(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} /metrics OK len=${metricsText.length}`);
+        } else {
+          console.warn(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} /metrics HTTP ${metricsRes.status}`);
+        }
+      } catch (e) { console.warn(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} /metrics fetch error: ${e.message}`); }
 
-          const promptTokens = this._getVllmMetric(txt, "prompt_tokens_total");
-          const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
+      if (metricsText) {
+        // Parse full vLLM telemetry using VllmMetricsParser
+        const telemetry = this.vllmParser.parse(metricsText, dtSec);
+        console.log(`[LlmProbe] ${this.spark?.id||"?"} port=${this.port} parser: ${telemetry ? "OK running="+telemetry.runningSlots+" kv="+telemetry.kvCacheUsage : "null"}`);
+        if (telemetry) {
+          this.vllmTelemetry = telemetry;
+
+          // Use the parser's throughput for generationTps/prefillTps
+          // (counter-delta based, more accurate than raw gauge)
+          if (dtSec > 0 && dtSec < 10) {
+            if (telemetry.generationTpsFromCounters > 0) {
+              this.generationTps = telemetry.generationTpsFromCounters;
+            }
+            if (telemetry.promptTpsFromCounters > 0) {
+              this.prefillTps = telemetry.promptTpsFromCounters;
+            }
+          }
+
+          // Also update lastTokenCounts from the parser's raw counters
+          // so legacy code stays consistent
+          // (the parser tracks its own state internally)
+
+          // Running requests as slotsActive
+          this.slotsActive = telemetry.runningSlots;
+        }
+
+        // Fallback: use the simple metric extraction if parser returned null
+        // or for fields the parser doesn't cover
+        if (!this.vllmTelemetry) {
+          const promptTokens = this._getVllmMetric(metricsText, "prompt_tokens_total");
+          const genTokens = this._getVllmMetric(metricsText, "generation_tokens_total");
           if (promptTokens != null && genTokens != null) {
             const deltaIn = promptTokens - this.lastTokenCounts.input;
             const deltaOut = genTokens - this.lastTokenCounts.output;
@@ -242,10 +282,12 @@ export class LlmProbe {
           this.requestsRunning = running;
           if (running != null) this.slotsActive = Math.round(running);
 
-          // Engine sleep state (0 = active, 1 = sleeping)
+          // Engine sleep state — exposed as a separate field, NOT gpuMemoryUtilization.
+          // (engine_sleep_state is a multi-label gauge: awake + weights_offloaded + discard_all;
+          //  summing them is meaningless. We only read the "awake" label.)
           if (this.gpuMemoryUtilization == null) {
-            const sleepState = this._getVllmMetric(txt, "engine_sleep_state");
-            if (sleepState != null) this.gpuMemoryUtilization = sleepState;
+            const sleepMatch = txt.match(/^vllm:engine_sleep_state\{[^}]*sleep_state="awake"[^}]*\}\s+([\d.eE+-]+)\s*$/m);
+            if (sleepMatch) this.gpuMemoryUtilization = null; // intentionally null — not a GPU mem util
           }
 
           // vLLM inference performance (same /metrics body — no extra HTTP)
@@ -443,6 +485,12 @@ export class LlmProbe {
   }
 
   _getSnapshot() {
+    const t = this.vllmTelemetry;
+    // Flatten vLLM detailed telemetry into the top-level LlmMetrics fields
+    // that the frontend LlmPanel reads directly (see src/api/types.ts).
+    // When the backend is llama.cpp or the parser returned null, these
+    // expanded fields are simply absent (undefined) and the panel renders
+    // them as "—".
     return {
       available: this.serverIsOpenAI !== null,
       backend: this.backendType,
@@ -465,6 +513,26 @@ export class LlmProbe {
       itlP95Seconds: this.itlP95Seconds,
       mtpAcceptanceRate: this.mtpAcceptanceRate,
       error: this.error,
+// ── Expanded telemetry (flattened from vllmParser output) ──
+      runningSlots: t?.runningSlots,
+      waitingSlots: t?.waitingSlots,
+      kvCacheUsage: t?.kvCacheUsage,
+      ttft: t?.ttft,
+      e2eLatency: t?.e2eRequestLatency,
+      interTokenLatency: t?.interTokenLatency,
+      promptTokensPerReq: t?.promptTokensPerRequest,
+      genTokensPerReq: t?.generationTokensPerRequest,
+      mtpAcceptanceRate: t?.specAcceptanceRate,
+      mtpAcceptedTokens: t?.specAcceptedTokens,
+      mtpDraftedTokens: t?.specDraftedTokens,
+      prefixCacheHitRate: t?.prefixCacheHitRate,
+      perPositionAcceptance: t?.specPerPositionAcceptance,
+      rollingAvgE2e: t?.rolling?.avgE2eLatency,
+      rollingAvgTtft: t?.rolling?.avgTtft,
+      rollingAvgTokensPerReq: t?.rolling?.avgTokensPerRequest,
+      rollingAvgTpsPerSlot: t?.rolling?.avgTpsPerSlot,
+      // Keep the raw nested object for debugging / future use
+      vllmTelemetry: t,
     };
   }
 

@@ -11,7 +11,12 @@ interface LlmPanelProps {
   llm: LlmMetrics | null;
   sparkId: string;
   llmPort: number;
+/** Legacy single-port change callback. Optional now that SparkPage manages multi-port. */
+  onLlmPortChange?: (port: number) => void;
+  /** Called when the user clicks the remove-port button (only when >1 port configured). */
   onRemovePort?: (port: number) => void;
+  /** Total number of LLM ports configured for this Spark (controls remove-button visibility). */
+  llmPortsCount?: number;
   className?: string;
 }
 
@@ -270,9 +275,7 @@ function AcceptanceGauge({ rate }: { rate: number | null | undefined }) {
   );
 }
 
-export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: LlmPanelProps) {
-  // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
-  const genHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.tps`);
+export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort, llmPortsCount, className }: LlmPanelProps) {
   const [history, setHistory] = useState<History>({
     genTps: [],
     prefillTps: [],
@@ -350,7 +353,7 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
     setSaveError(null);
     try {
       await updateLlmPort(sparkId, parsedPort);
-      // Port change will sync via WS broadcast — no local callback needed
+onLlmPortChange?.(parsedPort);
       setShowSettings(false);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save port");
@@ -364,12 +367,14 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
     color: "var(--color-success)",
     data: history.genTps,
     area: true,
+    yAxis: "left",
   };
   const preSeries: ChartSeries = {
     label: "prefill tok/s",
     color: "var(--color-accent)",
     data: history.prefillTps,
     area: false,
+    yAxis: "right",
   };
   const ttftSeries: ChartSeries = {
     label: "TTFT",
@@ -432,6 +437,17 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
             <GearIcon />
             <span>{showSettings ? "Done" : "Settings"}</span>
           </button>
+          {llmPortsCount != null && llmPortsCount > 1 && onRemovePort && (
+            <button
+              type="button"
+              title={`Remove port :${llmPort}`}
+              onClick={() => onRemovePort(llmPort)}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-danger transition-colors hover:bg-surface-hover"
+            >
+              <span>×</span>
+              <span>Remove</span>
+            </button>
+          )}
         </div>
       }
     >
@@ -603,7 +619,9 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
               maxPoints={HISTORY}
               height={170}
               yUnit=""
+              yUnitRight=""
               yMin={0}
+              yMax={140}
             />
           </div>
 
