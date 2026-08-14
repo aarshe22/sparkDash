@@ -7,6 +7,8 @@ sparks.json
 config/sparks.json
 config/sparks-secrets.json
 config/.secrets-key
+config/admin.env
+config/*.env
 config/bench-history.json
 config/bench-active.json
 config/showcase-history.json
