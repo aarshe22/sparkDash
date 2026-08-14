@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type {
+  DecodeBenchJob,
   HaproxyPreview,
   HaproxyBackendStatus,
   HaproxySettings,
@@ -11,6 +12,7 @@ import type {
 import { isLlmMonitoringEnabled, resolveSparkRole } from "../../api/sparkRole";
 import {
   deployHaproxy,
+  listDecodeBench,
   restartHaproxy,
   shutdownAllSparks,
   syncHaproxy,
@@ -29,6 +31,37 @@ import { readHaproxyAdminToken } from "../../lib/haproxyAdminToken";
 const OVERVIEW_LAYOUT_KEY = "sparkdash.ui.overviewLayout";
 
 type OverviewLayout = "grid" | "rows";
+
+interface BenchmarkSummary {
+  aggregateTps: number;
+  concurrency: number;
+  completedAt: number;
+  port: number;
+}
+
+function latestSuccessfulBenchmark(history: DecodeBenchJob[]): BenchmarkSummary | null {
+  const job = [...history]
+    .filter(
+      (candidate) =>
+        candidate.status === "completed" &&
+        candidate.completedAt != null &&
+        candidate.results.some(
+          (level) => !level.error && level.streamsOk > 0 && level.aggregateDecodeTps > 0
+        )
+    )
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
+  if (!job || job.completedAt == null) return null;
+  const level = job.results
+    .filter((candidate) => !candidate.error && candidate.streamsOk > 0)
+    .sort((a, b) => b.aggregateDecodeTps - a.aggregateDecodeTps)[0];
+  if (!level) return null;
+  return {
+    aggregateTps: level.aggregateDecodeTps,
+    concurrency: level.concurrency,
+    completedAt: job.completedAt,
+    port: job.config.port,
+  };
+}
 
 function readOverviewLayout(): OverviewLayout {
   try {
@@ -132,9 +165,11 @@ function NetworkMeter({
 function HaproxyBackendRow({
   backend,
   settings,
+  sparks,
 }: {
   backend: HaproxyBackendStatus;
   settings: HaproxySettings;
+  sparks: SparkSnapshot[];
 }) {
   const traffic = useGlobalMetricsHistoryTail(
     `haproxy.backend.${backend.name}.bytesDelta`
@@ -146,8 +181,17 @@ function HaproxyBackendRow({
       .replace(/^_+|_+$/g, "");
     return backend.name === item.name || backend.name.endsWith(slug);
   });
+  const targetSpark = mapping?.sparkId
+    ? sparks.find((spark) => spark.id === mapping.sparkId)
+    : sparks.find((spark) => {
+        const slug = spark.id.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        return backend.name.endsWith(slug);
+      });
+  const targetPort =
+    mapping?.llmPort ??
+    (targetSpark ? sparkLlmEndpoints(targetSpark).find((endpoint) => endpoint.available)?.port : null);
   return (
-    <div className="grid grid-cols-[minmax(120px,1fr)_80px_90px_130px_90px_80px] items-center gap-3 rounded px-2 py-1.5 text-[11px] odd:bg-surface-elevated/40">
+    <div className="grid grid-cols-[minmax(120px,1fr)_70px_80px_120px_80px_90px_150px] items-center gap-3 rounded px-2 py-1.5 text-[11px] odd:bg-surface-elevated/40">
       <span className="truncate font-mono text-text">{backend.name}</span>
       <span className={backend.status === "UP" ? "text-success" : "text-danger"}>
         {backend.status}
@@ -160,6 +204,16 @@ function HaproxyBackendRow({
         {backend.errors} errors
       </span>
       <span className="font-tabular text-accent">:{mapping?.port ?? "—"}</span>
+      <span
+        className="truncate font-mono text-muted"
+        title={
+          targetSpark && targetPort
+            ? `${targetSpark.lanIp}:${targetPort}`
+            : "No managed backend mapping"
+        }
+      >
+        {targetSpark && targetPort ? `${targetSpark.lanIp}:${targetPort}` : "—"}
+      </span>
     </div>
   );
 }
@@ -273,16 +327,17 @@ function HaproxyCard({
         ))}
       </div>
       <div className="mt-4 overflow-x-auto">
-        <div className="min-w-[620px] space-y-1">
-          <div className="grid grid-cols-[minmax(120px,1fr)_80px_90px_130px_90px_80px] gap-3 px-2 text-[9px] uppercase tracking-wide text-muted">
+        <div className="min-w-[760px] space-y-1">
+          <div className="grid grid-cols-[minmax(120px,1fr)_70px_80px_120px_80px_90px_150px] gap-3 px-2 text-[9px] uppercase tracking-wide text-muted">
             <span>Backend</span><span>Health</span><span>Sessions</span>
-            <span>Throughput</span><span>Errors</span><span>Public</span>
+            <span>Throughput</span><span>Errors</span><span>Listen</span><span>Backend target</span>
           </div>
           {(status?.backends ?? []).map((backend) => (
             <HaproxyBackendRow
               key={backend.name}
               backend={backend}
               settings={settings}
+              sparks={sparks}
             />
           ))}
           {(status?.backends.length ?? 0) === 0 && <p className="py-3 text-center text-xs text-muted">No backend status available.</p>}
@@ -405,12 +460,14 @@ function MiniStat({
 function SparkCard({
   spark,
   headSparkName,
+  benchmark,
   temperatureUnit,
   onSelect,
   layout,
 }: {
   spark: SparkSnapshot;
   headSparkName?: string | null;
+  benchmark?: BenchmarkSummary | null;
   temperatureUnit: "celsius" | "fahrenheit";
   onSelect?: (id: string) => void;
   layout: OverviewLayout;
@@ -613,6 +670,14 @@ function SparkCard({
                   {llm.generationTps.toFixed(0)}
                 </span>
                 <span className="text-sm font-normal text-muted"> tok/s</span>
+                {benchmark && (
+                  <div
+                    className="mt-1.5 font-tabular text-[10px] text-accent"
+                    title={`Most recent successful benchmark on port ${benchmark.port}, completed ${new Date(benchmark.completedAt).toLocaleString()}`}
+                  >
+                    Bench {benchmark.aggregateTps.toFixed(1)} tok/s @ {benchmark.concurrency}×
+                  </div>
+                )}
               </div>
             );
           })()}
@@ -651,6 +716,10 @@ export function OverviewPage({
   const visibleSparks = [...(hideOffline ? sparks.filter((s) => s.online) : sparks)].sort(
     (a, b) => Number(b.id.toLowerCase() === "lambda") - Number(a.id.toLowerCase() === "lambda")
   );
+  const benchmarkKey = visibleSparks
+    .map((spark) => `${spark.id}:${sparkLlmEndpoints(spark).map((endpoint) => endpoint.port).join(",")}`)
+    .join("|");
+  const [benchmarks, setBenchmarks] = useState<Record<string, BenchmarkSummary | null>>({});
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [layout, setLayout] = useState<OverviewLayout>(defaultLayout ?? readOverviewLayout);
@@ -658,6 +727,28 @@ export function OverviewPage({
   useEffect(() => {
     if (defaultLayout) setLayout(defaultLayout);
   }, [defaultLayout]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const targets = visibleSparks.filter(
+      (spark) => isLlmMonitoringEnabled(spark) && sparkLlmEndpoints(spark).length > 0
+    );
+    void Promise.all(
+      targets.map(async (spark) => {
+        try {
+          const response = await listDecodeBench(spark.id);
+          return [spark.id, latestSuccessfulBenchmark(response.history)] as const;
+        } catch {
+          return [spark.id, null] as const;
+        }
+      })
+    ).then((entries) => {
+      if (!cancelled) setBenchmarks(Object.fromEntries(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [benchmarkKey]);
 
   function changeLayout(next: OverviewLayout) {
     setLayout(next);
@@ -821,6 +912,7 @@ export function OverviewPage({
                 ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null
                 : null
             }
+            benchmark={benchmarks[spark.id]}
             temperatureUnit={temperatureUnit}
             onSelect={onSelectSpark}
             layout={layout}
