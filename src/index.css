@@ -295,6 +295,19 @@ input:disabled {
   box-shadow: var(--shadow-shell);
 }
 
+.dashboard-header {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .dashboard-header {
+    flex-wrap: wrap;
+  }
+}
+
 @media (max-width: 700px) {
   .dashboard-shell {
     padding: 20px;
@@ -514,12 +527,13 @@ input:disabled {
   font-weight: 400;
 }
 
-/* Brand column: logo pill + config downloads under it */
+/* Brand row: logo pill + config downloads, then the tab bar */
 .logo-brand {
   display: inline-flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
 }
 .opencode-download {
   display: inline-flex;

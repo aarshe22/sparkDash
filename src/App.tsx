@@ -219,7 +219,7 @@ function DashboardApp() {
   return (
     <div className="min-h-screen p-0 text-text sm:p-8">
       <div className="dashboard-shell">
-        <header className="flex flex-wrap items-center gap-3" style={{ marginBottom: "var(--density-header-gap)" }}>
+        <header className="dashboard-header" style={{ marginBottom: "var(--density-header-gap)" }}>
           <div className="logo-brand">
             <button
               type="button"
