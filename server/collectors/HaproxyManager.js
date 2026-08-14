@@ -389,11 +389,27 @@ export class HaproxyManager {
   }
 
   async restart(config = this.config()) {
-    const output = await this.exec(
-      this.remoteTarget(config),
-      `docker restart --timeout 30 ${shellQuote(config.containerName)}`,
-      { timeoutMs: 45_000 }
-    );
+    const container = shellQuote(config.containerName);
+    const statsProbe = [
+      `http://127.0.0.1:${config.statsPort}/;csv`,
+      `http://127.0.0.1:${config.statsPort}/stats;csv`,
+    ]
+      .map((url) => `curl -fsS --max-time 2 ${shellQuote(url)}`)
+      .join(" || ");
+    const command = `docker restart --timeout 30 ${container} >/dev/null &&
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  status=$(docker inspect ${container} --format '{{.State.Status}}' 2>/dev/null || true)
+  if [ "$status" = "running" ] && (${statsProbe}) >/dev/null 2>&1; then
+    printf %s ${container}
+    exit 0
+  fi
+  sleep 1
+done
+echo 'HAProxy restarted but its stats endpoint did not become ready' >&2
+exit 1`;
+    const output = await this.exec(this.remoteTarget(config), command, {
+      timeoutMs: 45_000,
+    });
     this._lastPollAt = 0;
     return { ok: true, container: output || config.containerName };
   }
@@ -409,16 +425,10 @@ export class HaproxyManager {
     const hostStats = statsUrls
       .map((url) => `curl -fsS --max-time 3 ${shellQuote(url)}`)
       .join(" || ");
-    const containerStats = statsUrls
-      .map(
-        (url) =>
-          `curl -fsS --max-time 3 ${shellQuote(url)} || wget -qO- ${shellQuote(url)}`
-      )
-      .join(" || ");
     const command = [
       `docker inspect ${container} --format '{{.State.Status}}|{{.State.StartedAt}}'`,
       `docker exec ${container} haproxy -vv 2>/dev/null | sed -n '1p'`,
-      `((${hostStats}) || docker exec ${container} sh -c ${shellQuote(containerStats)})`,
+      `((${hostStats}) || true)`,
     ].join("; ");
     try {
       const output = await this.exec(this.remoteTarget(), command, { timeoutMs: STATUS_TIMEOUT_MS });
