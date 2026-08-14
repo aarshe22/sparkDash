@@ -13,6 +13,8 @@ interface LlmPanelProps {
   llm: LlmMetrics | null;
   sparkId: string;
   llmPort: number;
+  haproxyPublicPort?: number | null;
+  onHaproxyPortChange?: (targetLlmPort: number, publicPort: number) => Promise<void>;
 /** Legacy single-port change callback. Optional now that SparkPage manages multi-port. */
   onLlmPortChange?: (port: number) => void;
   /** Called when the user clicks the remove-port button (only when >1 port configured). */
@@ -483,10 +485,13 @@ function fmtBytes(v: number | undefined | null): string {
   return `${v} B`;
 }
 
-export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort, llmPortsCount, className }: LlmPanelProps) {
+export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHaproxyPortChange, onLlmPortChange, onRemovePort, llmPortsCount, className }: LlmPanelProps) {
   const [history, setHistory] = useState<History>({ genTps: [], prefillTps: [], ttft: [], e2e: [] });
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
+  const [haproxyPortDraft, setHaproxyPortDraft] = useState(
+    haproxyPublicPort == null ? "" : String(haproxyPublicPort)
+  );
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -509,8 +514,11 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
   const available = llm?.available ?? false;
 
   useEffect(() => {
-    if (!showSettings) setPortDraft(String(llmPort));
-  }, [llmPort, showSettings]);
+    if (!showSettings) {
+      setPortDraft(String(llmPort));
+      setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort));
+    }
+  }, [llmPort, haproxyPublicPort, showSettings]);
 
   useEffect(() => {
     if (!llm || !available) return;
@@ -538,14 +546,32 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
 
   const portDirty = parsedPort !== null && parsedPort !== llmPort;
   const portInvalid = portDraft.trim() !== "" && parsedPort === null;
+  const parsedHaproxyPort = (() => {
+    if (!haproxyPortDraft.trim()) return null;
+    const n = Number(haproxyPortDraft);
+    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  })();
+  const haproxyPortInvalid = haproxyPortDraft.trim() !== "" && parsedHaproxyPort === null;
+  const haproxyPortDirty = parsedHaproxyPort !== haproxyPublicPort;
+  const settingsDirty = portDirty || haproxyPortDirty;
 
   const handleSavePort = async () => {
     if (parsedPort === null) { setSaveError("Port must be an integer 1-65535"); return; }
-    if (parsedPort === llmPort) { setShowSettings(false); return; }
+    if (haproxyPortInvalid) { setSaveError("HAProxy public port must be an integer 1-65535"); return; }
+    if (!settingsDirty) { setShowSettings(false); return; }
     setSaving(true); setSaveError(null);
     try {
-      await updateLlmPort(sparkId, parsedPort);
-      onLlmPortChange?.(parsedPort);
+      if (
+        parsedHaproxyPort != null &&
+        onHaproxyPortChange &&
+        (haproxyPortDirty || portDirty)
+      ) {
+        await onHaproxyPortChange(parsedPort, parsedHaproxyPort);
+      }
+      if (portDirty) {
+        await updateLlmPort(sparkId, parsedPort);
+        onLlmPortChange?.(parsedPort);
+      }
       setShowSettings(false);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save port");
@@ -611,7 +637,7 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
               <span aria-hidden>\u00D7</span><span>Remove</span>
             </button>
           )}
-          <button type="button" title={showSettings ? "Done" : "LLM settings"} onClick={() => { if (showSettings) { setPortDraft(String(llmPort)); setSaveError(null); resetModelList(); } setShowSettings(!showSettings); }} disabled={saving} className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover disabled:opacity-50 ${showSettings ? "bg-surface-elevated text-text" : ""}`}>
+          <button type="button" title={showSettings ? "Done" : "LLM settings"} onClick={() => { if (showSettings) { setPortDraft(String(llmPort)); setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort)); setSaveError(null); resetModelList(); } setShowSettings(!showSettings); }} disabled={saving} className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover disabled:opacity-50 ${showSettings ? "bg-surface-elevated text-text" : ""}`}>
             <GearIcon /><span>{showSettings ? "Done" : "Settings"}</span>
           </button>
           {llmPortsCount != null && llmPortsCount > 1 && onRemovePort && (
@@ -635,6 +661,25 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
               </button>
             </div>
           </div>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted">HAProxy public port</span>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              inputMode="numeric"
+              value={haproxyPortDraft}
+              placeholder="Not mapped"
+              onChange={(e) => {
+                setHaproxyPortDraft(e.target.value);
+                setSaveError(null);
+              }}
+              className="w-full rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-tabular text-sm text-text outline-none focus:border-accent"
+            />
+            <span className="block text-[10px] text-muted">
+              Public HTTPS listener for this specific LLM endpoint.
+            </span>
+          </label>
           {(listedModels != null || modelsError) && (
             <div className="space-y-1.5 rounded-md border border-border bg-surface-elevated px-3 py-2">
               <p className="text-[10px] text-muted">
@@ -663,10 +708,11 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
             </div>
           )}
           {portInvalid && <p className="text-[10px] text-danger">Enter an integer between 1 and 65535</p>}
+          {haproxyPortInvalid && <p className="text-[10px] text-danger">Enter an HAProxy port between 1 and 65535</p>}
           {saveError && <p className="text-[10px] text-danger">{saveError}</p>}
           <div className="flex items-center justify-end gap-2">
-            <button type="button" onClick={() => { setPortDraft(String(llmPort)); setSaveError(null); resetModelList(); setShowSettings(false); }} disabled={saving} className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">Cancel</button>
-            <button type="button" onClick={() => void handleSavePort()} disabled={saving || portInvalid || (!portDirty && parsedPort === llmPort)} className="rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50">{saving ? "Saving\u2026" : "Save"}</button>
+            <button type="button" onClick={() => { setPortDraft(String(llmPort)); setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort)); setSaveError(null); resetModelList(); setShowSettings(false); }} disabled={saving} className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">Cancel</button>
+            <button type="button" onClick={() => void handleSavePort()} disabled={saving || portInvalid || haproxyPortInvalid || !settingsDirty} className="rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50">{saving ? "Saving\u2026" : "Save"}</button>
           </div>
         </div>
       ) : !available ? (

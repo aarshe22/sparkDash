@@ -136,8 +136,8 @@ export function normalizeHaproxySettings(raw) {
       ? h.containerName.trim()
       : DEFAULT_HAPROXY_SETTINGS.containerName;
 
-  const seenNames = new Set();
-  const seenPorts = new Set();
+  const seenTargets = new Set();
+  const seenEnabledPorts = new Set();
   const inputMappings = Array.isArray(h.backendMappings)
     ? h.backendMappings
     : DEFAULT_HAPROXY_BACKENDS;
@@ -146,12 +146,27 @@ export function normalizeHaproxySettings(raw) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const name = typeof item.name === "string" ? item.name.trim() : "";
     const port = validPort(item.port, 0);
-    const key = name.toLowerCase();
+    const enabled = item.enabled !== false;
+    const sparkId =
+      typeof item.sparkId === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item.sparkId.trim())
+        ? item.sparkId.trim()
+        : undefined;
+    const llmPort = validPort(item.llmPort, 0) || undefined;
+    const targetKey = sparkId
+      ? `spark:${sparkId.toLowerCase()}:${llmPort || "primary"}`
+      : `name:${name.toLowerCase()}`;
     if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(name)) continue;
-    if (!port || seenNames.has(key) || seenPorts.has(port)) continue;
-    seenNames.add(key);
-    seenPorts.add(port);
-    backendMappings.push({ name, port, enabled: item.enabled !== false });
+    if (!port || seenTargets.has(targetKey) || (enabled && seenEnabledPorts.has(port))) continue;
+    seenTargets.add(targetKey);
+    if (enabled) seenEnabledPorts.add(port);
+    backendMappings.push({
+      name,
+      port,
+      enabled,
+      ...(sparkId ? { sparkId } : {}),
+      ...(llmPort ? { llmPort } : {}),
+    });
   }
 
   return {

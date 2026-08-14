@@ -1,7 +1,9 @@
 import type {
   DecodeBenchJob,
   DecodeBenchListResponse,
+  HaproxyDeployResponse,
   HaproxyPreview,
+  HaproxySync,
   HaproxyStatus,
   LlmMetrics,
   Settings,
@@ -344,6 +346,10 @@ export function previewHaproxy(): Promise<HaproxyPreview> {
   return apiFetch("/api/haproxy/preview");
 }
 
+export function syncHaproxy(): Promise<HaproxySync> {
+  return apiFetch("/api/haproxy/sync");
+}
+
 export interface HaproxyTestResponse {
   ok: boolean;
   containerStatus: string;
@@ -386,6 +392,17 @@ export function applyHaproxy(
     method: "POST",
     headers: adminHeaders(adminToken),
     body: JSON.stringify({ reload }),
+  });
+}
+
+export function deployHaproxy(
+  expectedHash: string,
+  adminToken: string
+): Promise<HaproxyDeployResponse> {
+  return apiFetch("/api/haproxy/deploy", {
+    method: "POST",
+    headers: adminHeaders(adminToken),
+    body: JSON.stringify({ expectedHash }),
   });
 }
 

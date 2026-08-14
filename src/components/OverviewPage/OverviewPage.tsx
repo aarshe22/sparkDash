@@ -10,10 +10,10 @@ import type {
 } from "../../api/types";
 import { isLlmMonitoringEnabled, resolveSparkRole } from "../../api/sparkRole";
 import {
-  applyHaproxy,
-  previewHaproxy,
+  deployHaproxy,
   restartHaproxy,
   shutdownAllSparks,
+  syncHaproxy,
   wakeAllSparks,
 } from "../../api/client";
 import { MetricBar } from "../ui/MetricBar";
@@ -24,7 +24,7 @@ import {
   useMetricsHistoryTail,
 } from "../../hooks/metricsStore";
 import { Sparkline } from "../ui/Sparkline";
-import { HAPROXY_ADMIN_TOKEN_KEY } from "../SettingsDialog";
+import { readHaproxyAdminToken } from "../../lib/haproxyAdminToken";
 
 const OVERVIEW_LAYOUT_KEY = "sparkdash.ui.overviewLayout";
 
@@ -167,49 +167,69 @@ function HaproxyBackendRow({
 function HaproxyCard({
   settings,
   status,
+  sparks,
 }: {
   settings: HaproxySettings;
   status: HaproxyStatus | null;
+  sparks: SparkSnapshot[];
 }) {
   const connections = useGlobalMetricsHistoryTail("haproxy.connections");
   const sessions = useGlobalMetricsHistoryTail("haproxy.sessionsDelta");
   const bytes = useGlobalMetricsHistoryTail("haproxy.bytesDelta");
   const errors = useGlobalMetricsHistoryTail("haproxy.errorsDelta");
-  const [busy, setBusy] = useState<"preview" | "apply" | "restart" | null>(null);
+  const [busy, setBusy] = useState<"sync" | "deploy" | "restart" | null>(null);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [preview, setPreview] = useState<HaproxyPreview | null>(null);
 
-  const adminToken = () => {
-    try {
-      return sessionStorage.getItem(HAPROXY_ADMIN_TOKEN_KEY) ?? "";
-    } catch {
-      return "";
-    }
-  };
-  const run = async (action: "preview" | "apply" | "restart") => {
-    const token = adminToken();
-    if (action !== "preview" && !token) {
+  const syncInvalidationKey = JSON.stringify({
+    settings,
+    fleet: sparks.map((spark) => ({
+      id: spark.id,
+      name: spark.name,
+      online: spark.online,
+      lanIp: spark.lanIp,
+      llm: spark.metrics.llm.map(({ available, port }) => ({ available, port })),
+    })),
+  });
+
+  useEffect(() => {
+    setPreview(null);
+  }, [syncInvalidationKey]);
+
+  const run = async (action: "sync" | "deploy" | "restart") => {
+    const token = readHaproxyAdminToken();
+    if (action !== "sync" && !token) {
       setMessage({ text: "Enter the admin token in Settings first.", ok: false });
       return;
     }
+    if (action === "deploy" && !preview) return;
     if (
-      action === "restart" &&
-      !confirm(`Restart HAProxy container "${settings.containerName}"? Active connections may be interrupted.`)
+      (action === "deploy" || action === "restart") &&
+      !confirm(
+        action === "deploy"
+          ? `Apply the synced config to "${settings.containerName}" and restart it? Active connections may be interrupted.`
+          : `Restart HAProxy container "${settings.containerName}"? Active connections may be interrupted.`
+      )
     ) return;
     setBusy(action);
     setMessage(null);
     try {
-      if (action === "preview") {
-        setPreview(await previewHaproxy());
-        setMessage({ text: "Preview generated; no remote changes made.", ok: true });
-      } else if (action === "apply") {
-        const result = await applyHaproxy(token, true);
-        setMessage({ text: `Applied and reloaded ${result.active?.length ?? 0} backend(s).`, ok: true });
+      if (action === "sync") {
+        setPreview(await syncHaproxy());
+        setMessage({ text: "Sync generated locally; no remote changes made.", ok: true });
+      } else if (action === "deploy") {
+        const result = await deployHaproxy(preview!.hash, token);
+        setPreview(null);
+        setMessage({
+          text: `Applied, sent, validated, and restarted ${result.active.length} backend(s).`,
+          ok: true,
+        });
       } else {
         await restartHaproxy(token);
         setMessage({ text: "HAProxy container restarted.", ok: true });
       }
     } catch (err) {
+      if (action === "deploy") setPreview(null);
       setMessage({ text: err instanceof Error ? err.message : `${action} failed`, ok: false });
     } finally {
       setBusy(null);
@@ -231,8 +251,8 @@ function HaproxyCard({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" disabled={busy != null} onClick={() => void run("preview")} className="rounded border border-border px-2.5 py-1.5 text-[11px] text-muted hover:bg-surface-hover disabled:opacity-50">Preview</button>
-          <button type="button" disabled={busy != null} onClick={() => void run("apply")} className="rounded bg-accent px-2.5 py-1.5 text-[11px] font-medium text-white disabled:opacity-50">Apply &amp; Reload</button>
+          <button type="button" disabled={busy != null} onClick={() => void run("sync")} className="rounded border border-border px-2.5 py-1.5 text-[11px] text-muted hover:bg-surface-hover disabled:opacity-50">Sync</button>
+          <button type="button" disabled={busy != null || !preview} onClick={() => void run("deploy")} className="rounded bg-accent px-2.5 py-1.5 text-[11px] font-medium text-white disabled:opacity-50">Apply &amp; Send</button>
           <button type="button" disabled={busy != null} onClick={() => void run("restart")} className="rounded border border-danger/40 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10 disabled:opacity-50">Restart…</button>
         </div>
       </div>
@@ -270,7 +290,23 @@ function HaproxyCard({
       </div>
       {preview && (
         <details className="mt-4 rounded border border-border bg-surface-elevated/50 p-3" open>
-          <summary className="cursor-pointer text-xs text-text">Managed config preview ({preview.active.length} active, {preview.skipped.length} skipped)</summary>
+          <summary className="cursor-pointer text-xs text-text">Synced managed config ({preview.active.length} active, {preview.skipped.length} skipped)</summary>
+          <div className="mt-2 space-y-1 text-[10px] text-muted">
+            <p>
+              Generated {new Date(preview.generatedAt).toLocaleString()} · {new Blob([preview.content]).size.toLocaleString()} bytes
+            </p>
+            <p className="break-all font-mono">SHA-256 {preview.hash}</p>
+            {preview.active.map((endpoint) => (
+              <p key={`${endpoint.sparkId}:${endpoint.targetPort}`} className="text-success">
+                Active · {endpoint.name} :{endpoint.publicPort} → {endpoint.targetHost}:{endpoint.targetPort}
+              </p>
+            ))}
+            {preview.skipped.map((endpoint, index) => (
+              <p key={`${endpoint.name}:${index}`} className="text-warning">
+                Skipped · {endpoint.name} — {endpoint.reason}
+              </p>
+            ))}
+          </div>
           <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] text-muted">{preview.content}</pre>
         </details>
       )}
@@ -612,7 +648,9 @@ export function OverviewPage({
   haproxySettings,
   haproxyStatus,
 }: OverviewPageProps) {
-  const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
+  const visibleSparks = [...(hideOffline ? sparks.filter((s) => s.online) : sparks)].sort(
+    (a, b) => Number(b.id.toLowerCase() === "lambda") - Number(a.id.toLowerCase() === "lambda")
+  );
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [layout, setLayout] = useState<OverviewLayout>(defaultLayout ?? readOverviewLayout);
@@ -766,9 +804,6 @@ export function OverviewPage({
       {headerActionsSlot
         ? createPortal(toolbar, headerActionsSlot)
         : <div className="flex flex-wrap items-center justify-end gap-3">{toolbar}</div>}
-      {haproxySettings?.enabled && (
-        <HaproxyCard settings={haproxySettings} status={haproxyStatus ?? null} />
-      )}
       <div
         className={
           layout === "rows"
@@ -792,6 +827,13 @@ export function OverviewPage({
           />
         ))}
       </div>
+      {haproxySettings?.enabled && (
+        <HaproxyCard
+          settings={haproxySettings}
+          status={haproxyStatus ?? null}
+          sparks={sparks}
+        />
+      )}
     </div>
   );
 }

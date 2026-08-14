@@ -26,16 +26,26 @@ function identity(value) {
 }
 
 function selectSpark(mapping, sparks) {
-  const wanted = identity(mapping.name);
+  const wanted = identity(mapping.sparkId || mapping.name);
   return (sparks || []).find((spark) => {
     const id = identity(spark?.id);
     const name = identity(spark?.name);
-    return id === wanted || name === wanted || name.startsWith(wanted);
+    return mapping.sparkId
+      ? id === wanted
+      : id === wanted || name === wanted || name.startsWith(wanted);
   });
 }
 
-function selectLlmPort(spark) {
+function selectLlmPort(mapping, spark) {
   const llms = Array.isArray(spark?.metrics?.llm) ? spark.metrics.llm : [];
+  if (mapping.llmPort) {
+    const exact = llms.find(
+      (llm) =>
+        llm?.available &&
+        llm.port === mapping.llmPort
+    );
+    return exact?.port ?? null;
+  }
   const available = llms.find(
     (llm) => llm?.available && Number.isInteger(llm.port) && llm.port >= 1 && llm.port <= 65535
   );
@@ -57,10 +67,41 @@ function finiteNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function contentConfigHash(config, content, active, skipped) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      canonicalJson({
+        version: 1,
+        config,
+        content,
+        active,
+        skipped,
+      }),
+      "utf8"
+    )
+    .digest("hex");
+}
+
 export class HaproxyManager {
-  constructor({ getConfig, getSparks }) {
+  constructor({ getConfig, getSparks, exec = sshExec, now = () => new Date() }) {
     this.getConfig = getConfig;
     this.getSparks = getSparks;
+    this.exec = exec;
+    this.now = now;
     this._cachedStatus = this.disabledStatus();
     this._lastPollAt = 0;
     this._pollPromise = null;
@@ -70,8 +111,7 @@ export class HaproxyManager {
     return normalizeHaproxySettings(this.getConfig?.());
   }
 
-  remoteTarget() {
-    const config = this.config();
+  remoteTarget(config = this.config()) {
     return {
       id: "haproxy",
       lanIp: config.remoteDockerHost,
@@ -103,8 +143,7 @@ export class HaproxyManager {
     };
   }
 
-  preview() {
-    const config = this.config();
+  sync(config = this.config()) {
     const sparks = this.getSparks?.() || [];
     const active = [];
     const skipped = [];
@@ -120,7 +159,7 @@ export class HaproxyManager {
         continue;
       }
       const spark = selectSpark(mapping, sparks);
-      const targetPort = selectLlmPort(spark);
+      const targetPort = selectLlmPort(mapping, spark);
       const targetHost = spark?.lanIp && String(spark.lanIp).trim();
       if (!spark || !spark.online || !targetHost || !targetPort) {
         skipped.push({ name: mapping.name, reason: "no live LLM endpoint" });
@@ -130,7 +169,7 @@ export class HaproxyManager {
         skipped.push({ name: mapping.name, reason: "invalid target host" });
         continue;
       }
-      const id = slug(mapping.name);
+      const id = slug(`${mapping.name}_${mapping.sparkId || ""}_${mapping.llmPort || ""}`);
       lines.push(`listen sparkdash_${id}`);
       // The managed public model ports are HTTPS. HAProxy accepts a directory
       // here and selects the matching SNI certificate for the configured domain.
@@ -170,11 +209,22 @@ export class HaproxyManager {
     if (Buffer.byteLength(content, "utf8") > MAX_SNIPPET_BYTES) {
       throw new Error("Generated HAProxy snippet exceeds the safe size limit");
     }
-    return { content, active, skipped, domain: config.domain };
+    return {
+      content,
+      active,
+      skipped,
+      domain: config.domain,
+      hash: contentConfigHash(config, content, active, skipped),
+      generatedAt: new Date(this.now()).toISOString(),
+    };
+  }
+
+  preview() {
+    return this.sync();
   }
 
   async testConnection() {
-    const output = await sshExec(
+    const output = await this.exec(
       this.remoteTarget(),
       `docker inspect --type container ${shellQuote(this.config().containerName)} --format '{{.State.Status}}'`,
       { timeoutMs: STATUS_TIMEOUT_MS }
@@ -182,27 +232,41 @@ export class HaproxyManager {
     return { ok: output === "running", containerStatus: output, message: output };
   }
 
-  async assertManagedSnippetLoaded() {
-    const config = this.config();
-    const command = await sshExec(
-      this.remoteTarget(),
+  async effectiveConfigPaths(config = this.config()) {
+    const commandJson = await this.exec(
+      this.remoteTarget(config),
       `docker inspect --type container ${shellQuote(config.containerName)} --format '{{json .Config.Cmd}}'`,
       { timeoutMs: STATUS_TIMEOUT_MS }
     );
-    if (!String(command).includes(config.managedSnippetPath)) {
+    let command;
+    try {
+      command = JSON.parse(commandJson);
+    } catch {
+      throw new Error("Could not parse the HAProxy container command");
+    }
+    const paths = [];
+    if (Array.isArray(command)) {
+      for (let index = 0; index < command.length - 1; index += 1) {
+        if (command[index] === "-f" && typeof command[index + 1] === "string") {
+          paths.push(command[index + 1]);
+          index += 1;
+        }
+      }
+    }
+    if (!paths.includes(config.managedSnippetPath)) {
       throw new Error(
         `HAProxy container does not load ${config.managedSnippetPath}. ` +
           "Add it as a second -f config in the container command before applying."
       );
     }
+    return paths;
   }
 
-  async uploadAndValidate(content) {
+  async uploadAndValidate(content, config = this.config()) {
     if (typeof content !== "string" || !content || Buffer.byteLength(content) > MAX_SNIPPET_BYTES) {
       throw new Error("Invalid generated HAProxy snippet");
     }
-    const config = this.config();
-    await this.assertManagedSnippetLoaded();
+    const effectivePaths = await this.effectiveConfigPaths(config);
     const nonce = crypto.randomBytes(8).toString("hex");
     const hostTemp = `/tmp/sparkdash-haproxy-${nonce}.b64`;
     const candidate = `${config.managedSnippetPath}.sparkdash.tmp`;
@@ -211,18 +275,21 @@ export class HaproxyManager {
     const command = [
       `umask 077`,
       `printf %s ${shellQuote(encoded)} > ${shellQuote(hostTemp)}`,
-      `docker exec ${container} mkdir -p ${shellQuote(config.managedSnippetPath.replace(/\/[^/]+$/, ""))}`,
+      `docker exec --user root ${container} mkdir -p ${shellQuote(config.managedSnippetPath.replace(/\/[^/]+$/, ""))}`,
       `base64 -d ${shellQuote(hostTemp)} > ${shellQuote(`${hostTemp}.cfg`)}`,
       `docker cp ${shellQuote(`${hostTemp}.cfg`)} ${shellQuote(`${config.containerName}:${candidate}`)}`,
+      `docker exec --user root ${container} chmod 0644 ${shellQuote(candidate)}`,
       `rm -f ${shellQuote(hostTemp)} ${shellQuote(`${hostTemp}.cfg`)}`,
-      `docker exec ${container} haproxy -c -f ${shellQuote(config.mainConfigPath)} -f ${shellQuote(candidate)}`,
+      `docker exec ${container} haproxy -c ${effectivePaths
+        .map((path) => `-f ${shellQuote(path === config.managedSnippetPath ? candidate : path)}`)
+        .join(" ")}`,
     ].join(" && ");
     try {
-      const validation = await sshExec(this.remoteTarget(), command, { timeoutMs: 20_000 });
+      const validation = await this.exec(this.remoteTarget(config), command, { timeoutMs: 20_000 });
       return { candidate, validation };
     } catch (error) {
-      await sshExec(
-        this.remoteTarget(),
+      await this.exec(
+        this.remoteTarget(config),
         `rm -f ${shellQuote(hostTemp)} ${shellQuote(`${hostTemp}.cfg`)}; docker exec ${container} rm -f ${shellQuote(candidate)}`,
         { timeoutMs: STATUS_TIMEOUT_MS }
       ).catch(() => {});
@@ -230,8 +297,7 @@ export class HaproxyManager {
     }
   }
 
-  async activate(candidate) {
-    const config = this.config();
+  async activate(candidate, config = this.config()) {
     if (candidate !== `${config.managedSnippetPath}.sparkdash.tmp`) {
       throw new Error("Candidate path does not match the managed HAProxy path");
     }
@@ -239,17 +305,17 @@ export class HaproxyManager {
     const managed = shellQuote(config.managedSnippetPath);
     const backup = shellQuote(`${config.managedSnippetPath}.sparkdash.bak`);
     const command =
-      `docker exec ${container} sh -eu -c ` +
+      `docker exec --user root ${container} sh -eu -c ` +
       shellQuote(
         `if [ -f ${managed} ]; then cp -p ${managed} ${backup}; fi; ` +
           `mv -f ${shellQuote(candidate)} ${managed}`
       );
-    await sshExec(this.remoteTarget(), command, { timeoutMs: STATUS_TIMEOUT_MS });
+    await this.exec(this.remoteTarget(config), command, { timeoutMs: STATUS_TIMEOUT_MS });
   }
 
   async reload() {
     const config = this.config();
-    const output = await sshExec(
+    const output = await this.exec(
       this.remoteTarget(),
       `docker kill --signal USR2 ${shellQuote(config.containerName)}`,
       { timeoutMs: STATUS_TIMEOUT_MS }
@@ -275,11 +341,57 @@ export class HaproxyManager {
     };
   }
 
-  async restart() {
+  async deploy(expectedHash) {
+    if (typeof expectedHash !== "string" || !/^[a-f0-9]{64}$/.test(expectedHash)) {
+      const error = new Error("expectedHash must be a lowercase SHA-256 hash");
+      error.status = 400;
+      error.code = "INVALID_HASH";
+      throw error;
+    }
+
+    // Sync is entirely local/read-only. Do not inspect or mutate the remote
+    // until the exact server-regenerated state matches the user's sync.
     const config = this.config();
-    const output = await sshExec(
-      this.remoteTarget(),
-      `docker restart --time 30 ${shellQuote(config.containerName)}`,
+    const current = this.sync(config);
+    if (current.hash !== expectedHash) {
+      const error = new Error("HAProxy sync is stale; run Sync again before Apply & Send");
+      error.status = 409;
+      error.code = "STALE_SYNC";
+      error.expectedHash = expectedHash;
+      error.currentHash = current.hash;
+      error.generatedAt = current.generatedAt;
+      throw error;
+    }
+    if (current.active.length === 0) {
+      const error = new Error("Refusing to deploy an HAProxy config with no live backends");
+      error.status = 400;
+      error.code = "NO_LIVE_BACKENDS";
+      throw error;
+    }
+
+    const uploaded = await this.uploadAndValidate(current.content, config);
+    await this.activate(uploaded.candidate, config);
+    const restart = await this.restart(config);
+    return {
+      ok: true,
+      hash: current.hash,
+      generatedAt: current.generatedAt,
+      active: current.active,
+      skipped: current.skipped,
+      diagnostics: {
+        validation: uploaded.validation,
+        activatedPath: config.managedSnippetPath,
+        backupPath: `${config.managedSnippetPath}.sparkdash.bak`,
+        restart,
+        steps: ["validated", "activated", "restarted"],
+      },
+    };
+  }
+
+  async restart(config = this.config()) {
+    const output = await this.exec(
+      this.remoteTarget(config),
+      `docker restart --timeout 30 ${shellQuote(config.containerName)}`,
       { timeoutMs: 45_000 }
     );
     this._lastPollAt = 0;
@@ -309,7 +421,7 @@ export class HaproxyManager {
       `((${hostStats}) || docker exec ${container} sh -c ${shellQuote(containerStats)})`,
     ].join("; ");
     try {
-      const output = await sshExec(this.remoteTarget(), command, { timeoutMs: STATUS_TIMEOUT_MS });
+      const output = await this.exec(this.remoteTarget(), command, { timeoutMs: STATUS_TIMEOUT_MS });
       const [inspect = "", versionLine = "", ...statsLines] = output.split(/\r?\n/);
       const [containerStatus, startedAt] = inspect.split("|");
       const rows = csvRows(statsLines.join("\n"));

@@ -452,6 +452,10 @@ export interface HaproxyBackendMapping {
   name: string;
   port: number;
   enabled: boolean;
+  /** Stable Spark target. Omitted on backward-compatible name-only mappings. */
+  sparkId?: string;
+  /** Specific private LLM endpoint port. Omitted to target the primary endpoint. */
+  llmPort?: number;
 }
 
 export interface HaproxySettings {
@@ -477,11 +481,31 @@ export interface HaproxyPreviewEndpoint {
   targetPort: number;
 }
 
-export interface HaproxyPreview {
+export interface HaproxySync {
   content: string;
   active: HaproxyPreviewEndpoint[];
   skipped: Array<{ name: string; reason: string }>;
   domain: string;
+  hash: string;
+  generatedAt: string;
+}
+
+/** Backward-compatible name for callers of GET /api/haproxy/preview. */
+export type HaproxyPreview = HaproxySync;
+
+export interface HaproxyDeployResponse {
+  ok: boolean;
+  hash: string;
+  generatedAt: string;
+  active: HaproxyPreviewEndpoint[];
+  skipped: HaproxySync["skipped"];
+  diagnostics: {
+    validation: string;
+    activatedPath: string;
+    backupPath: string;
+    restart: { ok: boolean; container: string };
+    steps: Array<"validated" | "activated" | "restarted">;
+  };
 }
 
 export interface Settings {

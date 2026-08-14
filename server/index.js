@@ -330,17 +330,20 @@ app.put("/api/settings", (req, res) => {
 });
 
 // ─── HAProxy integration ─────────────────────────────────
-// Preview and status are read-only and never include credentials.
-app.get("/api/haproxy/preview", (req, res) => {
+// Sync/preview and status are read-only and never include credentials.
+function sendHaproxySync(req, res) {
   if (!allowHaproxyRead(clientKey(req))) {
     return res.status(429).json({ error: "Too many HAProxy requests" });
   }
   try {
-    res.json(haproxyManager.preview());
+    res.json(haproxyManager.sync());
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}
+
+app.get("/api/haproxy/sync", sendHaproxySync);
+app.get("/api/haproxy/preview", sendHaproxySync);
 
 app.get("/api/haproxy/status", async (req, res) => {
   if (!allowHaproxyRead(clientKey(req))) {
@@ -380,6 +383,26 @@ app.put(
       res.json({ success: true, hasPassword: hasHaproxyPassword() });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/haproxy/deploy",
+  requireAdmin,
+  haproxyMutationLimit,
+  async (req, res) => {
+    try {
+      res.json(await haproxyManager.deploy(req.body?.expectedHash));
+    } catch (err) {
+      const status = err.status || 502;
+      res.status(status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.expectedHash ? { expectedHash: err.expectedHash } : {}),
+        ...(err.currentHash ? { currentHash: err.currentHash } : {}),
+        ...(err.generatedAt ? { generatedAt: err.generatedAt } : {}),
+      });
     }
   }
 );

@@ -7,6 +7,10 @@ import {
 } from "../api/client";
 import type { HaproxySettings, Settings } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
+import {
+  readHaproxyAdminToken,
+  storeHaproxyAdminToken,
+} from "../lib/haproxyAdminToken";
 
 interface SettingsDialogProps {
   open: boolean;
@@ -31,16 +35,6 @@ const POLL_PRESETS = [
   { label: "10s", value: 10000 },
 ];
 
-export const HAPROXY_ADMIN_TOKEN_KEY = "sparkdash.haproxy.adminToken";
-
-function readAdminToken(): string {
-  try {
-    return sessionStorage.getItem(HAPROXY_ADMIN_TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
 export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(false);
@@ -48,7 +42,7 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [haproxyDirty, setHaproxyDirty] = useState(false);
-  const [adminToken, setAdminToken] = useState(readAdminToken);
+  const [adminToken, setAdminToken] = useState(readHaproxyAdminToken);
   const [haproxyPassword, setHaproxyPasswordValue] = useState("");
   const [haproxyBusy, setHaproxyBusy] = useState<"test" | "password" | null>(null);
   const [haproxyMessage, setHaproxyMessage] = useState<{
@@ -102,16 +96,18 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
 
   const storeAdminToken = (value: string) => {
     setAdminToken(value);
-    try {
-      if (value) sessionStorage.setItem(HAPROXY_ADMIN_TOKEN_KEY, value);
-      else sessionStorage.removeItem(HAPROXY_ADMIN_TOKEN_KEY);
-    } catch {
-      /* Session storage may be blocked; component state remains usable. */
-    }
+    storeHaproxyAdminToken(value);
   };
 
   const handleSave = async () => {
     if (!settings) return;
+    const enabledPorts = settings.haproxy.backendMappings
+      .filter((mapping) => mapping.enabled)
+      .map((mapping) => mapping.port);
+    if (new Set(enabledPorts).size !== enabledPorts.length) {
+      setError("Enabled HAProxy mappings must use unique public ports.");
+      return;
+    }
     if (haproxyDirty && !adminToken.trim()) {
       setError("Enter the admin token to save HAProxy settings.");
       return;
@@ -549,13 +545,18 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
                       />
                       <input
                         value={mapping.name}
-                        placeholder="Spark name"
+                        placeholder="Mapping name"
                         onChange={(e) => {
                           const next = [...settings.haproxy.backendMappings];
                           next[index] = { ...mapping, name: e.target.value };
                           updateHaproxy({ backendMappings: next });
                         }}
                         className="min-w-0 rounded border border-border bg-surface-elevated px-2 py-1.5 text-xs text-text outline-none focus:border-accent"
+                        title={
+                          mapping.sparkId
+                            ? `Targets ${mapping.sparkId}:${mapping.llmPort ?? "primary"}`
+                            : "Legacy mapping: targets the named Spark's primary LLM endpoint"
+                        }
                       />
                       <input
                         type="number"

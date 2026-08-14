@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import type { SparkSnapshot } from "../../api/types";
+import type { HaproxySettings, SparkSnapshot } from "../../api/types";
+import { haproxyPublicPort } from "../../lib/haproxyMappings";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { updateSpark, refreshSparkMetric, addLlmPort, removeLlmPort } from "../../api/client";
 import { SparkHeader } from "./SparkHeader";
@@ -13,9 +14,22 @@ interface SparkPageProps {
   spark: SparkSnapshot;
   temperatureUnit: "celsius" | "fahrenheit";
   onEdit?: () => void;
+  haproxySettings?: HaproxySettings | null;
+  onHaproxyPortChange?: (
+    spark: SparkSnapshot,
+    llmPort: number,
+    targetLlmPort: number,
+    publicPort: number
+  ) => Promise<void>;
 }
 
-export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
+export function SparkPage({
+  spark,
+  temperatureUnit,
+  onEdit,
+  haproxySettings,
+  onHaproxyPortChange,
+}: SparkPageProps) {
   const { metrics } = spark;
   const [disabledDevices, setDisabledDevices] = useState<string[]>(spark.disabledDevices || []);
   const [disabledInterfaces, setDisabledInterfaces] = useState<string[]>(
@@ -123,6 +137,13 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
                   llm={llmMetrics}
                   sparkId={spark.id}
                   llmPort={port}
+                  haproxyPublicPort={haproxyPublicPort(haproxySettings, spark, port)}
+                  onHaproxyPortChange={
+                    onHaproxyPortChange
+                      ? (targetLlmPort, publicPort) =>
+                          onHaproxyPortChange(spark, port, targetLlmPort, publicPort)
+                      : undefined
+                  }
                   onRemovePort={canRemove ? handleRemovePort : undefined}
                   className="md:col-span-2"
                 />

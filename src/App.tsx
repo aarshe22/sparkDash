@@ -15,6 +15,11 @@ import { OVERVIEW_ID } from "./constants";
 import { downloadGrokConfig, downloadOpencodeConfig } from "./lib/opencodeConfig";
 import { liveMonitoredModels } from "./lib/llmEndpoints";
 import { setDashboardPath } from "./lib/dashboardPath";
+import { readHaproxyAdminToken } from "./lib/haproxyAdminToken";
+import {
+  endpointMappingName,
+  findHaproxyMappingIndex,
+} from "./lib/haproxyMappings";
 import type { Settings, SparkSnapshot } from "./api/types";
 
 function placeholderSnapshot(
@@ -145,6 +150,54 @@ function DashboardApp() {
       .catch((err) => console.error("Failed to save overview layout:", err));
   }, []);
 
+  const handleHaproxyPortChange = useCallback(
+    async (spark: SparkSnapshot, llmPort: number, targetLlmPort: number, publicPort: number) => {
+      if (!settings) throw new Error("HAProxy settings are still loading.");
+      if (!Number.isInteger(publicPort) || publicPort < 1 || publicPort > 65535) {
+        throw new Error("HAProxy public port must be an integer 1–65535.");
+      }
+      const token = readHaproxyAdminToken().trim();
+      if (!token) {
+        throw new Error("Enter the HAProxy admin token in Settings before saving this mapping.");
+      }
+      const mappings = settings.haproxy.backendMappings.map((mapping) => ({ ...mapping }));
+      const index = findHaproxyMappingIndex(settings.haproxy, spark, llmPort);
+      const selected = index >= 0 ? mappings[index] : null;
+      if (
+        mappings.some(
+          (mapping, mappingIndex) =>
+            mappingIndex !== index && mapping.enabled && mapping.port === publicPort
+        )
+      ) {
+        throw new Error(`Public port ${publicPort} is already used by another enabled mapping.`);
+      }
+      const nextMapping = {
+        ...(selected ?? {
+          name: endpointMappingName(spark, targetLlmPort),
+          enabled: true,
+        }),
+        port: publicPort,
+        sparkId: spark.id,
+        llmPort: targetLlmPort,
+      };
+      if (index >= 0) mappings[index] = nextMapping;
+      else mappings.push(nextMapping);
+      try {
+        const result = await updateSettings(
+          { haproxy: { ...settings.haproxy, backendMappings: mappings } },
+          token
+        );
+        setSettings(result);
+      } catch (error) {
+        if (error instanceof Error && /unauthorized|401/i.test(error.message)) {
+          throw new Error("The saved HAProxy admin token is invalid. Update it in Settings.");
+        }
+        throw error;
+      }
+    },
+    [settings]
+  );
+
   // Apply layout density (comfortable/compact) from persisted settings.
   useEffect(() => {
     if (settings?.density) {
@@ -217,11 +270,11 @@ function DashboardApp() {
 
   const liveOpencodeCount = useMemo(() => liveMonitoredModels(displaySparks).length, [displaySparks]);
   const handleDownloadOpencode = useCallback(() => {
-    downloadOpencodeConfig(displaySparks);
-  }, [displaySparks]);
+    downloadOpencodeConfig(displaySparks, settings?.haproxy);
+  }, [displaySparks, settings?.haproxy]);
   const handleDownloadGrok = useCallback(() => {
-    downloadGrokConfig(displaySparks);
-  }, [displaySparks]);
+    downloadGrokConfig(displaySparks, settings?.haproxy);
+  }, [displaySparks, settings?.haproxy]);
 
   return (
     <div className="min-h-screen p-0 text-text sm:p-8">
@@ -334,6 +387,8 @@ function DashboardApp() {
               spark={displayActive}
               temperatureUnit={settings?.temperatureUnit ?? "celsius"}
               onEdit={() => setEditId(displayActive.id)}
+              haproxySettings={settings?.haproxy}
+              onHaproxyPortChange={handleHaproxyPortChange}
             />
           ) : (
             <div className="panel mx-auto mt-16 max-w-md p-8 text-center">

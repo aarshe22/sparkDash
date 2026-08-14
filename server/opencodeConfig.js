@@ -36,6 +36,7 @@ function liveMonitoredModels(sparks) {
         port: llm.port ?? port,
         modelId: llm.modelId,
         contextLength: llm.contextLength ?? null,
+        primary: i === 0,
       });
     }
   }
@@ -74,11 +75,24 @@ function haproxyBaseUrl(ep, haproxy) {
   }
   const sparkId = mappingIdentity(ep.sparkId);
   const sparkName = mappingIdentity(ep.sparkName);
-  const mapping = haproxy.backendMappings.find((item) => {
+  const exact = haproxy.backendMappings.find((item) => {
     if (!item?.enabled || !Number.isInteger(item.port)) return false;
-    const name = mappingIdentity(item.name);
-    return name && (name === sparkId || name === sparkName || sparkName.startsWith(name));
+    return (
+      mappingIdentity(item.sparkId) === sparkId &&
+      item.llmPort === ep.port
+    );
   });
+  const primary = ep.primary
+    ? haproxy.backendMappings.find((item) => {
+        if (!item?.enabled || !Number.isInteger(item.port) || item.llmPort != null) {
+          return false;
+        }
+        if (item.sparkId) return mappingIdentity(item.sparkId) === sparkId;
+        const name = mappingIdentity(item.name);
+        return name && (name === sparkId || name === sparkName || sparkName.startsWith(name));
+      })
+    : null;
+  const mapping = exact || primary;
   return mapping ? `https://${haproxy.domain}:${mapping.port}/v1` : null;
 }
 
