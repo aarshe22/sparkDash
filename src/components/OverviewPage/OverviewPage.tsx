@@ -22,11 +22,17 @@ import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, GridIcon, PowerOffIcon, PowerOnIcon, RowsIcon } from "../ui/icons";
 import { formatContextLength, sparkLlmEndpoints } from "../../lib/llmEndpoints";
 import {
+  classifyModelDensity,
+  densityLabel,
+  type ModelDensity,
+} from "../../lib/modelDensity";
+import {
   useGlobalMetricsHistoryTail,
   useMetricsHistoryTail,
 } from "../../hooks/metricsStore";
 import { Sparkline } from "../ui/Sparkline";
 import { readHaproxyAdminToken } from "../../lib/haproxyAdminToken";
+import { ModelDensityDialog } from "../ModelDensityDialog";
 
 const OVERVIEW_LAYOUT_KEY = "sparkdash.ui.overviewLayout";
 
@@ -162,14 +168,44 @@ function NetworkMeter({
   );
 }
 
+function DensityChip({
+  modelId,
+  onOpen,
+}: {
+  modelId: string | null;
+  onOpen: (info: { density: ModelDensity; modelId: string | null }) => void;
+}) {
+  const density = classifyModelDensity(modelId);
+  if (!density) return null;
+  return (
+    <div className="overview-mini-stat">
+      <span className="overview-mini-stat-label text-[10px] tracking-wide text-muted">Arch</span>
+      <button
+        type="button"
+        className={`overview-density-chip is-${density}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpen({ density, modelId });
+        }}
+        title={`${densityLabel(density)} model — click for speed and quality notes`}
+        aria-haspopup="dialog"
+      >
+        {densityLabel(density)}
+      </button>
+    </div>
+  );
+}
+
 function HaproxyBackendRow({
   backend,
   settings,
   sparks,
+  onOpenDensity,
 }: {
   backend: HaproxyBackendStatus;
   settings: HaproxySettings;
   sparks: SparkSnapshot[];
+  onOpenDensity: (info: { density: ModelDensity; modelId: string | null }) => void;
 }) {
   const traffic = useGlobalMetricsHistoryTail(
     `haproxy.backend.${backend.name}.bytesDelta`
@@ -190,12 +226,30 @@ function HaproxyBackendRow({
   const targetPort =
     mapping?.llmPort ??
     (targetSpark ? sparkLlmEndpoints(targetSpark).find((endpoint) => endpoint.available)?.port : null);
+  const targetEndpoint =
+    targetSpark && targetPort
+      ? sparkLlmEndpoints(targetSpark).find((endpoint) => endpoint.port === targetPort)
+      : null;
+  const density = classifyModelDensity(targetEndpoint?.modelId ?? null);
   return (
-    <div className="grid grid-cols-[minmax(120px,1fr)_70px_80px_120px_80px_90px_150px] items-center gap-3 rounded px-2 py-1.5 text-[11px] odd:bg-surface-elevated/40">
+    <div className="grid grid-cols-[minmax(120px,1fr)_70px_56px_80px_120px_80px_90px_150px] items-center gap-3 rounded px-2 py-1.5 text-[11px] odd:bg-surface-elevated/40">
       <span className="truncate font-mono text-text">{backend.name}</span>
       <span className={backend.status === "UP" ? "text-success" : "text-danger"}>
         {backend.status}
       </span>
+      {density && targetEndpoint?.modelId ? (
+        <button
+          type="button"
+          className={`overview-density-chip is-${density}`}
+          onClick={() => onOpenDensity({ density, modelId: targetEndpoint.modelId })}
+          title={`${densityLabel(density)} model — click for speed and quality notes`}
+          aria-haspopup="dialog"
+        >
+          {densityLabel(density)}
+        </button>
+      ) : (
+        <span className="text-muted">—</span>
+      )}
       <span className="font-tabular text-muted">{backend.sessionsCurrent} live</span>
       <span className="font-tabular text-muted">
         {formatRate((traffic.at(-1) ?? 0) / 10)}
@@ -222,10 +276,12 @@ function HaproxyCard({
   settings,
   status,
   sparks,
+  onOpenDensity,
 }: {
   settings: HaproxySettings;
   status: HaproxyStatus | null;
   sparks: SparkSnapshot[];
+  onOpenDensity: (info: { density: ModelDensity; modelId: string | null }) => void;
 }) {
   const connections = useGlobalMetricsHistoryTail("haproxy.connections");
   const sessions = useGlobalMetricsHistoryTail("haproxy.sessionsDelta");
@@ -327,9 +383,9 @@ function HaproxyCard({
         ))}
       </div>
       <div className="mt-4 overflow-x-auto">
-        <div className="min-w-[760px] space-y-1">
-          <div className="grid grid-cols-[minmax(120px,1fr)_70px_80px_120px_80px_90px_150px] gap-3 px-2 text-[9px] uppercase tracking-wide text-muted">
-            <span>Backend</span><span>Health</span><span>Sessions</span>
+        <div className="min-w-[820px] space-y-1">
+          <div className="grid grid-cols-[minmax(120px,1fr)_70px_56px_80px_120px_80px_90px_150px] gap-3 px-2 text-[9px] uppercase tracking-wide text-muted">
+            <span>Backend</span><span>Health</span><span>Arch</span><span>Sessions</span>
             <span>Throughput</span><span>Errors</span><span>Listen</span><span>Backend target</span>
           </div>
           {(status?.backends ?? []).map((backend) => (
@@ -338,6 +394,7 @@ function HaproxyCard({
               backend={backend}
               settings={settings}
               sparks={sparks}
+              onOpenDensity={onOpenDensity}
             />
           ))}
           {(status?.backends.length ?? 0) === 0 && <p className="py-3 text-center text-xs text-muted">No backend status available.</p>}
@@ -463,6 +520,7 @@ function SparkCard({
   benchmark,
   temperatureUnit,
   onSelect,
+  onOpenDensity,
   layout,
 }: {
   spark: SparkSnapshot;
@@ -470,6 +528,7 @@ function SparkCard({
   benchmark?: BenchmarkSummary | null;
   temperatureUnit: "celsius" | "fahrenheit";
   onSelect?: (id: string) => void;
+  onOpenDensity: (info: { density: ModelDensity; modelId: string | null }) => void;
   layout: OverviewLayout;
 }) {
   const horizontal = layout === "rows";
@@ -628,7 +687,7 @@ function SparkCard({
                 className={
                   horizontal
                     ? "overview-card-ports"
-                    : "mt-3.5 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5"
+                    : "mt-3.5 grid grid-cols-3 gap-x-4 gap-y-2.5 border-t border-border pt-3.5"
                 }
               >
                 {rows.map((row) => (
@@ -649,6 +708,7 @@ function SparkCard({
                       }
                       bold={false}
                     />
+                    <DensityChip modelId={row.modelId} onOpen={onOpenDensity} />
                   </div>
                 ))}
               </div>
@@ -728,6 +788,10 @@ export function OverviewPage({
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [layout, setLayout] = useState<OverviewLayout>(defaultLayout ?? readOverviewLayout);
+  const [densityInfo, setDensityInfo] = useState<{
+    density: ModelDensity;
+    modelId: string | null;
+  } | null>(null);
 
   useEffect(() => {
     if (defaultLayout) setLayout(defaultLayout);
@@ -920,6 +984,7 @@ export function OverviewPage({
             benchmark={benchmarks[spark.id]}
             temperatureUnit={temperatureUnit}
             onSelect={onSelectSpark}
+            onOpenDensity={setDensityInfo}
             layout={layout}
           />
         ))}
@@ -929,8 +994,15 @@ export function OverviewPage({
           settings={haproxySettings}
           status={haproxyStatus ?? null}
           sparks={sparks}
+          onOpenDensity={setDensityInfo}
         />
       )}
+      <ModelDensityDialog
+        open={densityInfo != null}
+        density={densityInfo?.density ?? null}
+        modelId={densityInfo?.modelId ?? null}
+        onClose={() => setDensityInfo(null)}
+      />
     </div>
   );
 }
