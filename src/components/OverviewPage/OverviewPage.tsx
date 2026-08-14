@@ -669,7 +669,7 @@ function SparkCard({
                 <span className="overview-card-tps-value font-tabular text-[28px] font-bold leading-none text-text-strong">
                   {llm.generationTps.toFixed(0)}
                 </span>
-                <span className="text-sm font-normal text-muted"> tok/s</span>
+                <span className="text-sm font-normal text-muted"> current tok/s</span>
                 {benchmark && (
                   <div
                     className="mt-2"

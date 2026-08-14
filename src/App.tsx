@@ -10,9 +10,10 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { ConfigPreviewDialog } from "./components/ConfigPreviewDialog";
 import { GearIcon, BoltIcon, DownloadIcon, PlusIcon } from "./components/ui/icons";
 import { OVERVIEW_ID } from "./constants";
-import { downloadGrokConfig, downloadOpencodeConfig } from "./lib/opencodeConfig";
+import { buildGrokConfigToml, buildOpencodeConfig } from "./lib/opencodeConfig";
 import { liveMonitoredModels } from "./lib/llmEndpoints";
 import { setDashboardPath } from "./lib/dashboardPath";
 import { readHaproxyAdminToken } from "./lib/haproxyAdminToken";
@@ -91,6 +92,11 @@ function DashboardApp() {
   const [showAdd, setShowAdd] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [configPreview, setConfigPreview] = useState<{
+    filename: string;
+    content: string;
+    mimeType: string;
+  } | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   /** Used when WS is down so add/delete still updates the tab bar */
   const [fallbackSparks, setFallbackSparks] = useState<SparkSnapshot[]>([]);
@@ -269,11 +275,19 @@ function DashboardApp() {
   }, []);
 
   const liveOpencodeCount = useMemo(() => liveMonitoredModels(displaySparks).length, [displaySparks]);
-  const handleDownloadOpencode = useCallback(() => {
-    downloadOpencodeConfig(displaySparks, settings?.haproxy);
+  const handlePreviewOpencode = useCallback(() => {
+    setConfigPreview({
+      filename: "opencode.json",
+      content: `${JSON.stringify(buildOpencodeConfig(displaySparks, settings?.haproxy), null, 2)}\n`,
+      mimeType: "application/json",
+    });
   }, [displaySparks, settings?.haproxy]);
-  const handleDownloadGrok = useCallback(() => {
-    downloadGrokConfig(displaySparks, settings?.haproxy);
+  const handlePreviewGrok = useCallback(() => {
+    setConfigPreview({
+      filename: "config.toml",
+      content: buildGrokConfigToml(displaySparks, settings?.haproxy),
+      mimeType: "application/toml",
+    });
   }, [displaySparks, settings?.haproxy]);
 
   return (
@@ -294,7 +308,7 @@ function DashboardApp() {
             <button
               type="button"
               className="opencode-download"
-              onClick={handleDownloadOpencode}
+              onClick={handlePreviewOpencode}
               disabled={liveOpencodeCount === 0}
               title={
                 liveOpencodeCount === 0
@@ -312,7 +326,7 @@ function DashboardApp() {
             <button
               type="button"
               className="opencode-download"
-              onClick={handleDownloadGrok}
+              onClick={handlePreviewGrok}
               disabled={liveOpencodeCount === 0}
               title={
                 liveOpencodeCount === 0
@@ -432,6 +446,13 @@ function DashboardApp() {
         open={showSettings}
         onClose={() => setShowSettings(false)}
         onSaved={handleSettingsSaved}
+      />
+      <ConfigPreviewDialog
+        open={configPreview != null}
+        filename={configPreview?.filename ?? ""}
+        content={configPreview?.content ?? ""}
+        mimeType={configPreview?.mimeType ?? "text/plain"}
+        onClose={() => setConfigPreview(null)}
       />
     </div>
   );
