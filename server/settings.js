@@ -10,6 +10,29 @@ const ROOT = path.resolve(__dirname, "..");
 const SETTINGS_PATH =
   process.env.SETTINGS_JSON_PATH || path.join(ROOT, "config", "settings.json");
 
+export const DEFAULT_HAPROXY_BACKENDS = Object.freeze([
+  Object.freeze({ name: "Lambda", port: 8001, enabled: true }),
+  Object.freeze({ name: "GX10A", port: 8002, enabled: true }),
+  Object.freeze({ name: "GX10B", port: 8003, enabled: true }),
+  Object.freeze({ name: "GX10C", port: 8004, enabled: true }),
+  Object.freeze({ name: "GX10D", port: 8005, enabled: true }),
+]);
+
+export const DEFAULT_HAPROXY_SETTINGS = Object.freeze({
+  enabled: false,
+  exportEnabled: false,
+  domain: "oai.mhps.dev",
+  remoteDockerHost: "lambda",
+  sshPort: 22,
+  sshUser: "root",
+  sshAuth: "key",
+  containerName: "ai-haproxy",
+  statsPort: 8404,
+  mainConfigPath: "/usr/local/etc/haproxy/haproxy.cfg",
+  managedSnippetPath: "/usr/local/etc/haproxy/conf.d/sparkdash.cfg",
+  backendMappings: DEFAULT_HAPROXY_BACKENDS,
+});
+
 const DEFAULTS = Object.freeze({
   pollIntervalMs: 2000,
   defaultLlmPort: 8888,
@@ -21,6 +44,12 @@ const DEFAULTS = Object.freeze({
   density: "comfortable",
   /** Overview cards: tiled (3 per row) or horizontal (1 per row). */
   overviewLayout: "tiled",
+  /**
+   * Public URL path for this UI. "/" when served at the site root;
+   * "/dashboard" when reverse-proxied (refresh / back / deep links).
+   */
+  dashboardPath: "/",
+  haproxy: DEFAULT_HAPROXY_SETTINGS,
 });
 
 /** @type {typeof DEFAULTS} */
@@ -51,6 +80,131 @@ function _clampSettings(settings) {
   if (s.overviewLayout !== "tiled" && s.overviewLayout !== "horizontal") {
     s.overviewLayout = DEFAULTS.overviewLayout;
   }
+  s.dashboardPath = normalizeDashboardPathSetting(s.dashboardPath, DEFAULTS.dashboardPath);
+  s.haproxy = normalizeHaproxySettings(s.haproxy);
+  return s;
+}
+
+function validPort(value, fallback) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : fallback;
+}
+
+function validHost(value, fallback) {
+  const s = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!s || s.length > 253) return fallback;
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(s)) {
+    const octets = s.split(".").map(Number);
+    return octets.every((n) => n >= 0 && n <= 255) ? s : fallback;
+  }
+  return /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(s)
+    ? s
+    : fallback;
+}
+
+function validAbsolutePath(value, fallback) {
+  const s = typeof value === "string" ? value.trim() : "";
+  if (
+    !s.startsWith("/") ||
+    s.length > 512 ||
+    s.includes("..") ||
+    !/^\/[A-Za-z0-9._/-]+$/.test(s)
+  ) {
+    return fallback;
+  }
+  return s.replace(/\/{2,}/g, "/");
+}
+
+/**
+ * Return a strict, non-secret HAProxy settings object. Unknown mapping fields
+ * are discarded and malformed values fall back to safe defaults.
+ */
+export function normalizeHaproxySettings(raw) {
+  const h = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const domain = validHost(h.domain, DEFAULT_HAPROXY_SETTINGS.domain);
+  const remoteDockerHost = validHost(
+    h.remoteDockerHost,
+    DEFAULT_HAPROXY_SETTINGS.remoteDockerHost
+  );
+  const sshUser =
+    typeof h.sshUser === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(h.sshUser.trim())
+      ? h.sshUser.trim()
+      : DEFAULT_HAPROXY_SETTINGS.sshUser;
+  const containerName =
+    typeof h.containerName === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(h.containerName.trim())
+      ? h.containerName.trim()
+      : DEFAULT_HAPROXY_SETTINGS.containerName;
+
+  const seenNames = new Set();
+  const seenPorts = new Set();
+  const inputMappings = Array.isArray(h.backendMappings)
+    ? h.backendMappings
+    : DEFAULT_HAPROXY_BACKENDS;
+  const backendMappings = [];
+  for (const item of inputMappings.slice(0, 64)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    const port = validPort(item.port, 0);
+    const key = name.toLowerCase();
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(name)) continue;
+    if (!port || seenNames.has(key) || seenPorts.has(port)) continue;
+    seenNames.add(key);
+    seenPorts.add(port);
+    backendMappings.push({ name, port, enabled: item.enabled !== false });
+  }
+
+  return {
+    enabled: h.enabled === true,
+    exportEnabled: h.exportEnabled === true,
+    domain,
+    remoteDockerHost,
+    sshPort: validPort(h.sshPort, DEFAULT_HAPROXY_SETTINGS.sshPort),
+    sshUser,
+    sshAuth: h.sshAuth === "pass" ? "pass" : "key",
+    containerName,
+    statsPort: validPort(h.statsPort, DEFAULT_HAPROXY_SETTINGS.statsPort),
+    mainConfigPath: validAbsolutePath(
+      h.mainConfigPath,
+      DEFAULT_HAPROXY_SETTINGS.mainConfigPath
+    ),
+    managedSnippetPath: validAbsolutePath(
+      h.managedSnippetPath,
+      DEFAULT_HAPROXY_SETTINGS.managedSnippetPath
+    ),
+    backendMappings:
+      backendMappings.length > 0
+        ? backendMappings
+        : DEFAULT_HAPROXY_BACKENDS.map((item) => ({ ...item })),
+  };
+}
+
+function cloneSettings(settings) {
+  return {
+    ...settings,
+    haproxy: {
+      ...settings.haproxy,
+      backendMappings: settings.haproxy.backendMappings.map((item) => ({ ...item })),
+    },
+  };
+}
+
+function normalizeDashboardPathSetting(raw, fallback) {
+  if (raw == null) return fallback;
+  let s = String(raw).trim();
+  if (!s) return fallback;
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      s = new URL(s).pathname;
+    } catch {
+      return fallback;
+    }
+  }
+  if (s === "/") return "/";
+  s = s.replace(/\/+$/, "");
+  if (!s.startsWith("/")) s = `/${s}`;
+  if (s.includes("..") || /[?#\\]/.test(s)) return fallback;
+  if (!/^\/[A-Za-z0-9/_-]+$/.test(s)) return fallback;
   return s;
 }
 
@@ -69,7 +223,7 @@ export function loadSettings() {
       _settings = { ...DEFAULTS };
     }
   }
-  return { ..._settings };
+  return cloneSettings(_settings);
 }
 
 /** Persist current settings to disk. */
@@ -85,7 +239,7 @@ export function saveSettings() {
 
 /** Get current settings (clamped). */
 export function getSettings() {
-  return { ..._settings };
+  return cloneSettings(_settings);
 }
 
 /**
@@ -94,8 +248,15 @@ export function getSettings() {
  * @returns {typeof DEFAULTS}
  */
 export function updateSettings(patch) {
-  const merged = _clampSettings({ ..._settings, ...patch });
+  const merged = _clampSettings({
+    ..._settings,
+    ...patch,
+    haproxy:
+      patch?.haproxy && typeof patch.haproxy === "object"
+        ? { ..._settings.haproxy, ...patch.haproxy }
+        : _settings.haproxy,
+  });
   _settings = merged;
   saveSettings();
-  return { ..._settings };
+  return cloneSettings(_settings);
 }

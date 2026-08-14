@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { SparkSnapshot, WsSnapshot } from "../api/types";
+import type { HaproxyStatus, SparkSnapshot, WsSnapshot } from "../api/types";
 import { ingestSnapshots } from "./metricsStore";
 import { OVERVIEW_ID } from "../constants";
+import { getDashboardPath } from "../lib/dashboardPath";
 
-const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`;
 const RECONNECT_DELAY = 2000;
+
+function websocketUrl(): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const prefix = getDashboardPath();
+  return `${proto}//${location.host}${prefix}/ws`;
+}
 
 /**
  * useSnapshot — connects to the WebSocket and exposes live spark data.
@@ -13,6 +19,7 @@ const RECONNECT_DELAY = 2000;
 export function useSnapshot() {
   const [sparks, setSparks] = useState<SparkSnapshot[]>([]);
   const [connected, setConnected] = useState(false);
+  const [haproxy, setHaproxy] = useState<HaproxyStatus | null>(null);
   const [activeId, setActiveId] = useState<string | null>(OVERVIEW_ID);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -27,7 +34,7 @@ export function useSnapshot() {
     // Avoid duplicate sockets while OPEN or still CONNECTING
     if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
 
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(websocketUrl());
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -40,8 +47,9 @@ export function useSnapshot() {
         const msg: WsSnapshot = JSON.parse(ev.data);
         if (msg.type === "snapshot") {
           // Feed the central history store (8b) before notifying React state.
-          ingestSnapshots(msg.sparks);
+          ingestSnapshots(msg.sparks, msg.haproxy);
           setSparks(msg.sparks);
+          setHaproxy(msg.haproxy);
           // Default to the Overview tab; keep the current selection if it
           // is still valid (Overview is always valid).
           setActiveId((prev) => {
@@ -92,5 +100,6 @@ export function useSnapshot() {
     activeId,
     setActiveId,
     activeSpark,
+    haproxy,
   };
 }

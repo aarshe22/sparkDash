@@ -1,6 +1,8 @@
 import type {
   DecodeBenchJob,
   DecodeBenchListResponse,
+  HaproxyPreview,
+  HaproxyStatus,
   LlmMetrics,
   Settings,
   ShowcaseSessionState,
@@ -318,9 +320,85 @@ export function fetchSettings(): Promise<Settings> {
   return apiFetch("/api/settings");
 }
 
-export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
+function adminHeaders(adminToken: string): Record<string, string> {
+  return { Authorization: `Bearer ${adminToken.trim()}` };
+}
+
+export function updateSettings(
+  patch: Partial<Settings>,
+  adminToken?: string
+): Promise<Settings> {
   return apiFetch("/api/settings", {
     method: "PUT",
     body: JSON.stringify(patch),
+    headers: adminToken ? adminHeaders(adminToken) : undefined,
+  });
+}
+
+// ─── HAProxy administration ───────────────────────────────
+export function fetchHaproxyStatus(): Promise<HaproxyStatus> {
+  return apiFetch("/api/haproxy/status");
+}
+
+export function previewHaproxy(): Promise<HaproxyPreview> {
+  return apiFetch("/api/haproxy/preview");
+}
+
+export interface HaproxyTestResponse {
+  ok: boolean;
+  containerStatus: string;
+  message: string;
+}
+
+export interface HaproxyActionResponse {
+  ok: boolean;
+  container?: string;
+  signal?: string;
+  active?: HaproxyPreview["active"];
+  skipped?: HaproxyPreview["skipped"];
+  validation?: string;
+  reload?: HaproxyActionResponse | null;
+}
+
+export function testHaproxy(adminToken: string): Promise<HaproxyTestResponse> {
+  return apiFetch("/api/haproxy/test", {
+    method: "POST",
+    headers: adminHeaders(adminToken),
+  });
+}
+
+export function setHaproxyPassword(
+  password: string,
+  adminToken: string
+): Promise<{ success: boolean; hasPassword: boolean }> {
+  return apiFetch("/api/haproxy/password", {
+    method: "PUT",
+    headers: adminHeaders(adminToken),
+    body: JSON.stringify({ password }),
+  });
+}
+
+export function applyHaproxy(
+  adminToken: string,
+  reload = true
+): Promise<HaproxyActionResponse> {
+  return apiFetch("/api/haproxy/apply", {
+    method: "POST",
+    headers: adminHeaders(adminToken),
+    body: JSON.stringify({ reload }),
+  });
+}
+
+export function reloadHaproxy(adminToken: string): Promise<HaproxyActionResponse> {
+  return apiFetch("/api/haproxy/reload", {
+    method: "POST",
+    headers: adminHeaders(adminToken),
+  });
+}
+
+export function restartHaproxy(adminToken: string): Promise<HaproxyActionResponse> {
+  return apiFetch("/api/haproxy/restart", {
+    method: "POST",
+    headers: adminHeaders(adminToken),
   });
 }

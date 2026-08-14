@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
-import { fetchSettings, updateSettings } from "../api/client";
-import type { Settings } from "../api/types";
+import {
+  fetchSettings,
+  setHaproxyPassword,
+  testHaproxy,
+  updateSettings,
+} from "../api/client";
+import type { HaproxySettings, Settings } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
 
 interface SettingsDialogProps {
@@ -26,12 +31,30 @@ const POLL_PRESETS = [
   { label: "10s", value: 10000 },
 ];
 
+export const HAPROXY_ADMIN_TOKEN_KEY = "sparkdash.haproxy.adminToken";
+
+function readAdminToken(): string {
+  try {
+    return sessionStorage.getItem(HAPROXY_ADMIN_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [haproxyDirty, setHaproxyDirty] = useState(false);
+  const [adminToken, setAdminToken] = useState(readAdminToken);
+  const [haproxyPassword, setHaproxyPasswordValue] = useState("");
+  const [haproxyBusy, setHaproxyBusy] = useState<"test" | "password" | null>(null);
+  const [haproxyMessage, setHaproxyMessage] = useState<{
+    text: string;
+    ok: boolean;
+  } | null>(null);
 
   useEscape(onClose);
 
@@ -40,6 +63,9 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
       setSettings(null);
       setError(null);
       setDirty(false);
+      setHaproxyDirty(false);
+      setHaproxyPasswordValue("");
+      setHaproxyMessage(null);
       return;
     }
     let cancelled = false;
@@ -66,20 +92,96 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
     setDirty(true);
   };
 
+  const updateHaproxy = (patch: Partial<HaproxySettings>) => {
+    setSettings((prev) =>
+      prev ? { ...prev, haproxy: { ...prev.haproxy, ...patch } } : prev
+    );
+    setDirty(true);
+    setHaproxyDirty(true);
+  };
+
+  const storeAdminToken = (value: string) => {
+    setAdminToken(value);
+    try {
+      if (value) sessionStorage.setItem(HAPROXY_ADMIN_TOKEN_KEY, value);
+      else sessionStorage.removeItem(HAPROXY_ADMIN_TOKEN_KEY);
+    } catch {
+      /* Session storage may be blocked; component state remains usable. */
+    }
+  };
+
   const handleSave = async () => {
     if (!settings) return;
+    if (haproxyDirty && !adminToken.trim()) {
+      setError("Enter the admin token to save HAProxy settings.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const result = await updateSettings(settings);
+      const patch: Partial<Settings> = haproxyDirty
+        ? settings
+        : (({ haproxy: _haproxy, ...general }) => general)(settings);
+      const result = await updateSettings(patch, haproxyDirty ? adminToken : undefined);
       setSettings(result);
       setDirty(false);
+      setHaproxyDirty(false);
       onSaved(result);
       onClose();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleHaproxyTest = async () => {
+    if (!adminToken.trim()) {
+      setHaproxyMessage({ text: "Enter the admin token first.", ok: false });
+      return;
+    }
+    setHaproxyBusy("test");
+    setHaproxyMessage(null);
+    try {
+      const result = await testHaproxy(adminToken);
+      setHaproxyMessage({
+        text: result.ok
+          ? `Connection succeeded; container is ${result.containerStatus}.`
+          : result.message || "Connection test failed.",
+        ok: result.ok,
+      });
+    } catch (err) {
+      setHaproxyMessage({
+        text: err instanceof Error ? err.message : "Connection test failed.",
+        ok: false,
+      });
+    } finally {
+      setHaproxyBusy(null);
+    }
+  };
+
+  const handleHaproxyPassword = async () => {
+    if (!haproxyPassword) {
+      setHaproxyMessage({ text: "Password left unchanged.", ok: true });
+      return;
+    }
+    if (!adminToken.trim()) {
+      setHaproxyMessage({ text: "Enter the admin token first.", ok: false });
+      return;
+    }
+    setHaproxyBusy("password");
+    setHaproxyMessage(null);
+    try {
+      await setHaproxyPassword(haproxyPassword, adminToken);
+      setHaproxyPasswordValue("");
+      setHaproxyMessage({ text: "Encrypted SSH password saved.", ok: true });
+    } catch (err) {
+      setHaproxyMessage({
+        text: err instanceof Error ? err.message : "Unable to save password.",
+        ok: false,
+      });
+    } finally {
+      setHaproxyBusy(null);
     }
   };
 
@@ -94,7 +196,7 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="settings-panel w-full max-w-sm p-6">
+      <div className="settings-panel max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-y-auto p-4 sm:p-6">
         <h2 className="mb-4 text-sm font-semibold text-text-strong">Settings</h2>
 
         {loading && <p className="text-xs text-muted">Loading…</p>}
@@ -138,6 +240,23 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
               />
               <p className="mt-1 text-[10px] text-muted">
                 Pre-filled when adding a new Spark (1–65535)
+              </p>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs text-muted">Dashboard URL</label>
+              <input
+                type="text"
+                spellCheck={false}
+                value={settings.dashboardPath ?? ""}
+                onChange={(e) => update({ dashboardPath: e.target.value })}
+                placeholder="/dashboard"
+                className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 font-mono text-xs text-text outline-none focus:border-accent"
+              />
+              <p className="mt-1 text-[10px] text-muted">
+                Public path for this UI. Use <span className="font-mono">/dashboard</span> when
+                reverse-proxied, or <span className="font-mono">/</span> at the site root. Affects
+                refresh, back/forward, and deep links.
               </p>
             </div>
 
@@ -284,6 +403,244 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
                 </span>
               </label>
             </div>
+
+            <section className="border-t border-border pt-5">
+              <div className="mb-4 flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-text-strong">AI HAProxy</h3>
+                  <p className="mt-1 text-[10px] text-muted">
+                    Monitor and explicitly administer the remote AI traffic proxy.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.haproxy.enabled}
+                  onClick={() => updateHaproxy({ enabled: !settings.haproxy.enabled })}
+                  className={`toggle-track relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                    settings.haproxy.enabled ? "is-on" : ""
+                  }`}
+                >
+                  <span
+                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
+                      settings.haproxy.enabled ? "translate-x-4" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <label className="mb-4 flex items-start gap-3 text-xs text-muted">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.haproxy.exportEnabled}
+                  onClick={() =>
+                    updateHaproxy({ exportEnabled: !settings.haproxy.exportEnabled })
+                  }
+                  className={`toggle-track relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                    settings.haproxy.exportEnabled ? "is-on" : ""
+                  }`}
+                >
+                  <span
+                    className={`toggle-dot inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
+                      settings.haproxy.exportEnabled ? "translate-x-4" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+                <span>
+                  <span className="block text-text">Use HAProxy URLs in config downloads</span>
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
+                    Enable only after the managed listeners have been applied and verified.
+                  </span>
+                </span>
+              </label>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {[
+                  ["Domain", "domain", "ai.example.com"],
+                  ["Remote Docker host", "remoteDockerHost", "proxy.example.com"],
+                  ["SSH user", "sshUser", "ubuntu"],
+                  ["Docker container", "containerName", "ai-haproxy"],
+                  ["Main config path", "mainConfigPath", "/usr/local/etc/haproxy/haproxy.cfg"],
+                  ["Managed snippet path", "managedSnippetPath", "/usr/local/etc/haproxy/conf.d/sparkdash.cfg"],
+                ].map(([label, key, placeholder]) => (
+                  <label key={key} className={key.includes("Path") ? "lg:col-span-2" : ""}>
+                    <span className="mb-1 block text-xs text-muted">{label}</span>
+                    <input
+                      type="text"
+                      spellCheck={false}
+                      value={String(settings.haproxy[key as keyof HaproxySettings] ?? "")}
+                      placeholder={placeholder}
+                      onChange={(e) => updateHaproxy({ [key]: e.target.value })}
+                      className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 font-mono text-xs text-text outline-none focus:border-accent"
+                    />
+                  </label>
+                ))}
+                <label>
+                  <span className="mb-1 block text-xs text-muted">SSH port</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={settings.haproxy.sshPort}
+                    onChange={(e) => updateHaproxy({ sshPort: Number(e.target.value) })}
+                    className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1 block text-xs text-muted">Stats port</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={settings.haproxy.statsPort}
+                    onChange={(e) => updateHaproxy({ statsPort: Number(e.target.value) })}
+                    className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1 block text-xs text-muted">SSH authentication</span>
+                  <select
+                    value={settings.haproxy.sshAuth}
+                    onChange={(e) =>
+                      updateHaproxy({ sshAuth: e.target.value as "key" | "pass" })
+                    }
+                    className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                  >
+                    <option value="key">SSH key</option>
+                    <option value="pass">Password</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="mt-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs text-muted">Backend mappings</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateHaproxy({
+                        backendMappings: [
+                          ...settings.haproxy.backendMappings,
+                          { name: "", port: 8001, enabled: true },
+                        ],
+                      })
+                    }
+                    className="rounded border border-border px-2 py-1 text-[10px] text-accent hover:bg-surface-hover"
+                  >
+                    + Add mapping
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {settings.haproxy.backendMappings.map((mapping, index) => (
+                    <div
+                      key={index}
+                      className="grid grid-cols-[auto_minmax(0,1fr)_88px_auto] items-center gap-2"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={mapping.enabled}
+                        aria-label={`Enable ${mapping.name || `mapping ${index + 1}`}`}
+                        onChange={(e) => {
+                          const next = [...settings.haproxy.backendMappings];
+                          next[index] = { ...mapping, enabled: e.target.checked };
+                          updateHaproxy({ backendMappings: next });
+                        }}
+                      />
+                      <input
+                        value={mapping.name}
+                        placeholder="Spark name"
+                        onChange={(e) => {
+                          const next = [...settings.haproxy.backendMappings];
+                          next[index] = { ...mapping, name: e.target.value };
+                          updateHaproxy({ backendMappings: next });
+                        }}
+                        className="min-w-0 rounded border border-border bg-surface-elevated px-2 py-1.5 text-xs text-text outline-none focus:border-accent"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={mapping.port}
+                        aria-label="Public port"
+                        onChange={(e) => {
+                          const next = [...settings.haproxy.backendMappings];
+                          next[index] = { ...mapping, port: Number(e.target.value) };
+                          updateHaproxy({ backendMappings: next });
+                        }}
+                        className="rounded border border-border bg-surface-elevated px-2 py-1.5 text-xs text-text outline-none focus:border-accent"
+                      />
+                      <button
+                        type="button"
+                        aria-label="Remove mapping"
+                        onClick={() =>
+                          updateHaproxy({
+                            backendMappings: settings.haproxy.backendMappings.filter(
+                              (_, i) => i !== index
+                            ),
+                          })
+                        }
+                        className="px-2 text-danger"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label>
+                  <span className="mb-1 block text-xs text-muted">Admin token (this tab only)</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={adminToken}
+                    onChange={(e) => storeAdminToken(e.target.value)}
+                    className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1 block text-xs text-muted">Encrypted SSH password</span>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={haproxyPassword}
+                      placeholder="Blank keeps current"
+                      onChange={(e) => setHaproxyPasswordValue(e.target.value)}
+                      className="min-w-0 flex-1 rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                    />
+                    <button
+                      type="button"
+                      disabled={haproxyBusy != null}
+                      onClick={() => void handleHaproxyPassword()}
+                      className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-accent hover:bg-surface-hover disabled:opacity-50"
+                    >
+                      {haproxyBusy === "password" ? "Saving…" : "Save Password"}
+                    </button>
+                  </div>
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled={haproxyBusy != null}
+                  onClick={() => void handleHaproxyTest()}
+                  className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-accent hover:bg-surface-hover disabled:opacity-50"
+                >
+                  {haproxyBusy === "test" ? "Testing…" : "Test Connection"}
+                </button>
+                <span className="text-[10px] text-muted">
+                  Test uses the currently saved HAProxy settings.
+                </span>
+                {haproxyMessage && (
+                  <span className={`text-xs ${haproxyMessage.ok ? "text-success" : "text-danger"}`}>
+                    {haproxyMessage.text}
+                  </span>
+                )}
+              </div>
+            </section>
           </div>
         )}
 

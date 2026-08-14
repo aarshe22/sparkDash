@@ -59,11 +59,35 @@ function tomlString(value) {
   return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+function mappingIdentity(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function haproxyBaseUrl(ep, haproxy) {
+  if (
+    !haproxy?.enabled ||
+    !haproxy?.exportEnabled ||
+    !haproxy.domain ||
+    !Array.isArray(haproxy.backendMappings)
+  ) {
+    return null;
+  }
+  const sparkId = mappingIdentity(ep.sparkId);
+  const sparkName = mappingIdentity(ep.sparkName);
+  const mapping = haproxy.backendMappings.find((item) => {
+    if (!item?.enabled || !Number.isInteger(item.port)) return false;
+    const name = mappingIdentity(item.name);
+    return name && (name === sparkId || name === sparkName || sparkName.startsWith(name));
+  });
+  return mapping ? `https://${haproxy.domain}:${mapping.port}/v1` : null;
+}
+
 /**
  * @param {object[]} sparks Spark snapshots (same shape as the WS payload)
+ * @param {object} [haproxy] Normalized HAProxy settings
  * @returns {object} OpenCode config JSON
  */
-export function buildOpencodeConfig(sparks) {
+export function buildOpencodeConfig(sparks, haproxy) {
   const live = liveMonitoredModels(sparks);
   const provider = {};
   let model;
@@ -77,7 +101,7 @@ export function buildOpencodeConfig(sparks) {
       npm: "@ai-sdk/openai-compatible",
       name: `${ep.sparkName} (:${ep.port})`,
       options: {
-        baseURL: `http://${ep.lanIp}:${ep.port}/v1`,
+        baseURL: haproxyBaseUrl(ep, haproxy) || `http://${ep.lanIp}:${ep.port}/v1`,
       },
       models: {
         [ep.modelId]: {
@@ -99,7 +123,7 @@ export function buildOpencodeConfig(sparks) {
  * @param {object[]} sparks Spark snapshots (same shape as the WS payload)
  * @returns {string} Grok Build config.toml
  */
-export function buildGrokConfigToml(sparks) {
+export function buildGrokConfigToml(sparks, haproxy) {
   const live = liveMonitoredModels(sparks);
   const lines = [
     "# sparkDash export for Grok Build.",
@@ -113,7 +137,11 @@ export function buildGrokConfigToml(sparks) {
     const context = ep.contextLength != null && ep.contextLength > 0 ? ep.contextLength : null;
     lines.push(`[model.${key}]`);
     lines.push(`model = ${tomlString(ep.modelId)}`);
-    lines.push(`base_url = ${tomlString(`http://${ep.lanIp}:${ep.port}/v1`)}`);
+    lines.push(
+      `base_url = ${tomlString(
+        haproxyBaseUrl(ep, haproxy) || `http://${ep.lanIp}:${ep.port}/v1`
+      )}`
+    );
     lines.push(`name = ${tomlString(`${ep.sparkName} (:${ep.port})`)}`);
     lines.push(`api_backend = "chat_completions"`);
     lines.push(`api_key = "not-needed"`);

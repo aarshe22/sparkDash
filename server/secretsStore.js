@@ -108,6 +108,40 @@ function decrypt(blobB64, key) {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
 }
 
+function readPayload() {
+  if (!fs.existsSync(SPARKS_SECRETS_PATH)) {
+    return { version: 2, secrets: {}, namespaces: {} };
+  }
+  const parsed = JSON.parse(fs.readFileSync(SPARKS_SECRETS_PATH, "utf8"));
+  return {
+    version: Number(parsed?.version) || 1,
+    secrets:
+      parsed?.secrets && typeof parsed.secrets === "object" && !Array.isArray(parsed.secrets)
+        ? parsed.secrets
+        : {},
+    namespaces:
+      parsed?.namespaces &&
+      typeof parsed.namespaces === "object" &&
+      !Array.isArray(parsed.namespaces)
+        ? parsed.namespaces
+        : {},
+  };
+}
+
+function writePayload(secrets, namespaces) {
+  const hasSecrets = Object.keys(secrets).length > 0;
+  const hasNamespaces = Object.keys(namespaces).length > 0;
+  if (!hasSecrets && !hasNamespaces) {
+    if (fs.existsSync(SPARKS_SECRETS_PATH)) {
+      fs.accessSync(SPARKS_SECRETS_PATH, fs.constants.W_OK);
+      fs.unlinkSync(SPARKS_SECRETS_PATH);
+    }
+    return;
+  }
+  const payload = JSON.stringify({ version: 2, secrets, namespaces }, null, 2) + "\n";
+  atomicWrite(SPARKS_SECRETS_PATH, payload, 0o644);
+}
+
 /**
  * Load sparkId -> password map from disk.
  * @returns {Map<string, string>}
@@ -118,8 +152,7 @@ export function loadSecrets() {
 
   try {
     const key = resolveKey();
-    const raw = fs.readFileSync(SPARKS_SECRETS_PATH, "utf8");
-    const data = JSON.parse(raw);
+    const data = readPayload();
     const entries = data?.secrets || {};
     if (typeof entries !== "object" || entries === null) return map;
 
@@ -160,29 +193,56 @@ export function loadSecrets() {
  * @param {Map<string, string>} passwords
  */
 export function saveSecrets(passwords) {
-  if (!passwords || passwords.size === 0) {
-    // Only delete if we can read the path; never "clear" on a failed load
-    if (fs.existsSync(SPARKS_SECRETS_PATH)) {
-      try {
-        fs.accessSync(SPARKS_SECRETS_PATH, fs.constants.W_OK);
-        fs.unlinkSync(SPARKS_SECRETS_PATH);
-      } catch (err) {
-        throw new Error(
-          `Failed to clear secrets file (permission?): ${err.message}. ` +
-            `Run: sudo chown -R $(id -u):$(id -g) config/sparks-secrets.json`
-        );
-      }
-    }
-    return;
-  }
-
-  const key = resolveKey();
+  const existing = readPayload();
+  const key =
+    passwords?.size > 0 || Object.keys(existing.namespaces).length > 0 ? resolveKey() : null;
   const secrets = {};
-  for (const [id, pw] of passwords.entries()) {
+  for (const [id, pw] of passwords || []) {
     if (pw) secrets[id] = encrypt(pw, key);
   }
 
-  const payload = JSON.stringify({ version: 1, secrets }, null, 2) + "\n";
-  atomicWrite(SPARKS_SECRETS_PATH, payload, 0o644);
+  try {
+    writePayload(secrets, existing.namespaces);
+  } catch (err) {
+    throw new Error(
+      `Failed to save secrets file (permission?): ${err.message}. ` +
+        `Run: sudo chown -R $(id -u):$(id -g) config/sparks-secrets.json`
+    );
+  }
   console.log(`[secretsStore] Saved ${Object.keys(secrets).length} SSH password(s)`);
+}
+
+/** Return the HAProxy SSH password, or null. Never expose this through public settings. */
+export function getHaproxyPassword() {
+  if (!fs.existsSync(SPARKS_SECRETS_PATH)) return null;
+  const payload = readPayload();
+  const blob = payload.namespaces?.haproxy?.sshPassword;
+  if (typeof blob !== "string" || !blob) return null;
+  return decrypt(blob, resolveKey()) || null;
+}
+
+export function hasHaproxyPassword() {
+  try {
+    return Boolean(getHaproxyPassword());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist or clear the HAProxy SSH password while preserving the legacy spark
+ * password map byte-for-byte.
+ */
+export function setHaproxyPassword(password) {
+  const payload = readPayload();
+  const namespaces = { ...payload.namespaces };
+  if (password == null || password === "") {
+    delete namespaces.haproxy;
+  } else {
+    namespaces.haproxy = {
+      ...(namespaces.haproxy || {}),
+      sshPassword: encrypt(String(password), resolveKey()),
+    };
+  }
+  writePayload(payload.secrets, namespaces);
 }

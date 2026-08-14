@@ -1,10 +1,30 @@
 import { useEffect, useState } from "react";
-import type { SparkSnapshot } from "../../api/types";
+import { createPortal } from "react-dom";
+import type {
+  HaproxyPreview,
+  HaproxyBackendStatus,
+  HaproxySettings,
+  HaproxyStatus,
+  NetworkInterface,
+  SparkSnapshot,
+} from "../../api/types";
 import { isLlmMonitoringEnabled, resolveSparkRole } from "../../api/sparkRole";
-import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
+import {
+  applyHaproxy,
+  previewHaproxy,
+  restartHaproxy,
+  shutdownAllSparks,
+  wakeAllSparks,
+} from "../../api/client";
 import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, GridIcon, PowerOffIcon, PowerOnIcon, RowsIcon } from "../ui/icons";
 import { formatContextLength, sparkLlmEndpoints } from "../../lib/llmEndpoints";
+import {
+  useGlobalMetricsHistoryTail,
+  useMetricsHistoryTail,
+} from "../../hooks/metricsStore";
+import { Sparkline } from "../ui/Sparkline";
+import { HAPROXY_ADMIN_TOKEN_KEY } from "../SettingsDialog";
 
 const OVERVIEW_LAYOUT_KEY = "sparkdash.ui.overviewLayout";
 
@@ -35,6 +55,9 @@ interface OverviewPageProps {
   onSelectSpark?: (id: string) => void;
   defaultLayout?: OverviewLayout;
   onLayoutChange?: (layout: OverviewLayout) => void;
+  headerActionsSlot?: HTMLElement | null;
+  haproxySettings?: HaproxySettings | null;
+  haproxyStatus?: HaproxyStatus | null;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -44,6 +67,215 @@ function celsiusToFahrenheit(c: number): number {
 function formatMb(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${Math.round(mb)} MB`;
+}
+
+function formatRate(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB/s`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB/s`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB/s`;
+  return `${Math.round(bytes)} B/s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB`;
+  return `${Math.round(bytes)} B`;
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function NetworkMeter({
+  sparkId,
+  iface,
+  fallbackSpeedMbps,
+}: {
+  sparkId: string;
+  iface: NetworkInterface;
+  fallbackSpeedMbps?: number | null;
+}) {
+  const rx = useMetricsHistoryTail(sparkId, `net.${iface.name}.rx`);
+  const tx = useMetricsHistoryTail(sparkId, `net.${iface.name}.tx`);
+  const util = useMetricsHistoryTail(sparkId, `net.${iface.name}.util`);
+  const combined = util.length
+    ? util
+    : rx.map((value, index) => value + (tx[index] ?? 0));
+  const speed = iface.speedMbps ?? fallbackSpeedMbps;
+  const currentUtil =
+    speed && speed > 0
+      ? Math.min(100, (Math.max(iface.rxSpeed, iface.txSpeed) * 8 / (speed * 1_000_000)) * 100)
+      : null;
+  return (
+    <div className="flex min-w-0 items-center gap-2 rounded border border-border bg-surface-elevated/50 px-2 py-1.5">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate font-mono text-[10px] text-text">{iface.name}</span>
+          <span className="font-tabular text-[9px] text-muted">
+            {currentUtil == null ? iface.operstate : `${currentUtil.toFixed(1)}%`}
+          </span>
+        </div>
+        <div className="font-tabular text-[9px] text-muted">
+          ↓ {formatRate(iface.rxSpeed)} · ↑ {formatRate(iface.txSpeed)}
+        </div>
+      </div>
+      <Sparkline data={combined} width={72} height={22} />
+    </div>
+  );
+}
+
+function HaproxyBackendRow({
+  backend,
+  settings,
+}: {
+  backend: HaproxyBackendStatus;
+  settings: HaproxySettings;
+}) {
+  const traffic = useGlobalMetricsHistoryTail(
+    `haproxy.backend.${backend.name}.bytesDelta`
+  );
+  const mapping = settings.backendMappings.find((item) => {
+    const slug = item.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return backend.name === item.name || backend.name.endsWith(slug);
+  });
+  return (
+    <div className="grid grid-cols-[minmax(120px,1fr)_80px_90px_130px_90px_80px] items-center gap-3 rounded px-2 py-1.5 text-[11px] odd:bg-surface-elevated/40">
+      <span className="truncate font-mono text-text">{backend.name}</span>
+      <span className={backend.status === "UP" ? "text-success" : "text-danger"}>
+        {backend.status}
+      </span>
+      <span className="font-tabular text-muted">{backend.sessionsCurrent} live</span>
+      <span className="font-tabular text-muted">
+        {formatRate((traffic.at(-1) ?? 0) / 10)}
+      </span>
+      <span className={`font-tabular ${backend.errors ? "text-danger" : "text-muted"}`}>
+        {backend.errors} errors
+      </span>
+      <span className="font-tabular text-accent">:{mapping?.port ?? "—"}</span>
+    </div>
+  );
+}
+
+function HaproxyCard({
+  settings,
+  status,
+}: {
+  settings: HaproxySettings;
+  status: HaproxyStatus | null;
+}) {
+  const connections = useGlobalMetricsHistoryTail("haproxy.connections");
+  const sessions = useGlobalMetricsHistoryTail("haproxy.sessionsDelta");
+  const bytes = useGlobalMetricsHistoryTail("haproxy.bytesDelta");
+  const errors = useGlobalMetricsHistoryTail("haproxy.errorsDelta");
+  const [busy, setBusy] = useState<"preview" | "apply" | "restart" | null>(null);
+  const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
+  const [preview, setPreview] = useState<HaproxyPreview | null>(null);
+
+  const adminToken = () => {
+    try {
+      return sessionStorage.getItem(HAPROXY_ADMIN_TOKEN_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  };
+  const run = async (action: "preview" | "apply" | "restart") => {
+    const token = adminToken();
+    if (action !== "preview" && !token) {
+      setMessage({ text: "Enter the admin token in Settings first.", ok: false });
+      return;
+    }
+    if (
+      action === "restart" &&
+      !confirm(`Restart HAProxy container "${settings.containerName}"? Active connections may be interrupted.`)
+    ) return;
+    setBusy(action);
+    setMessage(null);
+    try {
+      if (action === "preview") {
+        setPreview(await previewHaproxy());
+        setMessage({ text: "Preview generated; no remote changes made.", ok: true });
+      } else if (action === "apply") {
+        const result = await applyHaproxy(token, true);
+        setMessage({ text: `Applied and reloaded ${result.active?.length ?? 0} backend(s).`, ok: true });
+      } else {
+        await restartHaproxy(token);
+        setMessage({ text: "HAProxy container restarted.", ok: true });
+      }
+    } catch (err) {
+      setMessage({ text: err instanceof Error ? err.message : `${action} failed`, ok: false });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="overview-card w-full p-4 sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className={`h-2 w-2 rounded-full ${status?.online ? "bg-success dot-glow-success" : "bg-danger"}`} />
+            <h2 className="text-sm font-semibold text-text-strong">AI HAProxy</h2>
+            <span className="font-mono text-[10px] text-muted">{settings.domain}</span>
+          </div>
+          <p className="mt-1 text-[10px] text-muted">
+            {settings.containerName} · {status?.containerStatus ?? "waiting"} ·
+            {" "}v{status?.version ?? "—"} · uptime {formatDuration(status?.uptimeSeconds ?? null)}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" disabled={busy != null} onClick={() => void run("preview")} className="rounded border border-border px-2.5 py-1.5 text-[11px] text-muted hover:bg-surface-hover disabled:opacity-50">Preview</button>
+          <button type="button" disabled={busy != null} onClick={() => void run("apply")} className="rounded bg-accent px-2.5 py-1.5 text-[11px] font-medium text-white disabled:opacity-50">Apply &amp; Reload</button>
+          <button type="button" disabled={busy != null} onClick={() => void run("restart")} className="rounded border border-danger/40 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10 disabled:opacity-50">Restart…</button>
+        </div>
+      </div>
+      {message && <p className={`mt-2 text-[11px] ${message.ok ? "text-success" : "text-danger"}`}>{message.text}</p>}
+      {status?.error && <p className="mt-2 text-[11px] text-danger">{status.error}</p>}
+      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        {[
+          ["Connections", status?.connectionsCurrent ?? 0, connections],
+          ["New sessions", sessions.at(-1) ?? 0, sessions],
+          ["Traffic delta", formatBytes(bytes.at(-1) ?? 0), bytes],
+          ["Errors delta", errors.at(-1) ?? 0, errors],
+        ].map(([label, value, data]) => (
+          <div key={String(label)} className="rounded border border-border bg-surface-elevated/50 p-2.5">
+            <div className="text-[10px] text-muted">{label as string}</div>
+            <div className="font-tabular text-lg font-semibold text-text-strong">{String(value)}</div>
+            <Sparkline data={data as readonly number[]} width={120} height={28} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 overflow-x-auto">
+        <div className="min-w-[620px] space-y-1">
+          <div className="grid grid-cols-[minmax(120px,1fr)_80px_90px_130px_90px_80px] gap-3 px-2 text-[9px] uppercase tracking-wide text-muted">
+            <span>Backend</span><span>Health</span><span>Sessions</span>
+            <span>Throughput</span><span>Errors</span><span>Public</span>
+          </div>
+          {(status?.backends ?? []).map((backend) => (
+            <HaproxyBackendRow
+              key={backend.name}
+              backend={backend}
+              settings={settings}
+            />
+          ))}
+          {(status?.backends.length ?? 0) === 0 && <p className="py-3 text-center text-xs text-muted">No backend status available.</p>}
+        </div>
+      </div>
+      {preview && (
+        <details className="mt-4 rounded border border-border bg-surface-elevated/50 p-3" open>
+          <summary className="cursor-pointer text-xs text-text">Managed config preview ({preview.active.length} active, {preview.skipped.length} skipped)</summary>
+          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] text-muted">{preview.content}</pre>
+        </details>
+      )}
+    </section>
+  );
 }
 
 /** Format a storage value in MB, stripping trailing ".0" and optionally omitting the unit. */
@@ -348,7 +580,22 @@ function SparkCard({
               </div>
             );
           })()}
+
         </>
+      )}
+      {spark.metrics.network?.interfaces.some((iface) => !iface.disabled) && (
+        <div className={horizontal ? "flex min-w-[240px] flex-1 flex-col gap-1.5" : "mt-3.5 space-y-1.5 border-t border-border pt-3.5"}>
+          {spark.metrics.network.interfaces
+            .filter((iface) => !iface.disabled)
+            .map((iface) => (
+              <NetworkMeter
+                key={iface.name}
+                sparkId={spark.id}
+                iface={iface}
+                fallbackSpeedMbps={spark.metrics.network?.linkSpeedMbps}
+              />
+            ))}
+        </div>
       )}
     </div>
   );
@@ -361,6 +608,9 @@ export function OverviewPage({
   onSelectSpark,
   defaultLayout,
   onLayoutChange,
+  headerActionsSlot,
+  haproxySettings,
+  haproxyStatus,
 }: OverviewPageProps) {
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
   const [batchLoading, setBatchLoading] = useState(false);
@@ -430,7 +680,7 @@ export function OverviewPage({
     }
   }
 
-  if (visibleSparks.length === 0) {
+  if (visibleSparks.length === 0 && !haproxySettings?.enabled) {
     const allOffline = hideOffline && sparks.length > 0;
     return (
       <div className="panel mx-auto mt-16 max-w-md p-8 text-center">
@@ -451,67 +701,74 @@ export function OverviewPage({
 
   const onlineCount = visibleSparks.filter((s) => s.online).length;
 
+  const toolbar = (
+    <div className="overview-header-actions">
+      {batchMsg && (
+        <span className={`text-[11px] ${batchMsg.tone === "ok" ? "text-success" : "text-danger"}`}>
+          {batchMsg.text}
+        </span>
+      )}
+      {sparks.length > 0 && (
+        <div className="flex items-center gap-1.5">
+          <div className="overview-layout-toggle" role="group" aria-label="Overview card layout">
+            <button
+              type="button"
+              className={layout === "grid" ? "is-active" : ""}
+              onClick={() => changeLayout("grid")}
+              title="Vertical cards · 3 per row"
+              aria-pressed={layout === "grid"}
+              aria-label="Vertical cards, 3 per row"
+            >
+              <GridIcon className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              className={layout === "rows" ? "is-active" : ""}
+              onClick={() => changeLayout("rows")}
+              title="Horizontal cards · 1 per row"
+              aria-pressed={layout === "rows"}
+              aria-label="Horizontal cards, 1 per row"
+            >
+              <RowsIcon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleWakeAll()}
+            disabled={batchLoading}
+            title="Wake all Sparks that have a MAC configured (WoL)"
+            className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50"
+          >
+            <PowerOnIcon className="h-3 w-3" />
+            Wake All
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleShutdownAll()}
+            disabled={batchLoading || !sparks.some((s) => s.online)}
+            title="Shut down all online Sparks"
+            className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-danger/20 hover:text-danger transition-colors disabled:opacity-50"
+          >
+            <PowerOffIcon className="h-3 w-3" />
+            Shutdown All
+          </button>
+        </div>
+      )}
+      <span className="online-chip">
+        <span className="dot" />
+        {onlineCount}/{visibleSparks.length} online
+      </span>
+    </div>
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <div className="flex items-center gap-3">
-          {batchMsg && (
-            <span className={`text-[11px] ${batchMsg.tone === "ok" ? "text-success" : "text-danger"}`}>
-              {batchMsg.text}
-            </span>
-          )}
-          {sparks.length > 0 && (
-            <div className="flex items-center gap-1.5">
-              <div className="overview-layout-toggle" role="group" aria-label="Overview card layout">
-                <button
-                  type="button"
-                  className={layout === "grid" ? "is-active" : ""}
-                  onClick={() => changeLayout("grid")}
-                  title="Vertical cards · 3 per row"
-                  aria-pressed={layout === "grid"}
-                  aria-label="Vertical cards, 3 per row"
-                >
-                  <GridIcon className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  className={layout === "rows" ? "is-active" : ""}
-                  onClick={() => changeLayout("rows")}
-                  title="Horizontal cards · 1 per row"
-                  aria-pressed={layout === "rows"}
-                  aria-label="Horizontal cards, 1 per row"
-                >
-                  <RowsIcon className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => void handleWakeAll()}
-                disabled={batchLoading}
-                title="Wake all Sparks that have a MAC configured (WoL)"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50"
-              >
-                <PowerOnIcon className="h-3 w-3" />
-                Wake All
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleShutdownAll()}
-                disabled={batchLoading || !sparks.some((s) => s.online)}
-                title="Shut down all online Sparks"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-danger/20 hover:text-danger transition-colors disabled:opacity-50"
-              >
-                <PowerOffIcon className="h-3 w-3" />
-                Shutdown All
-              </button>
-            </div>
-          )}
-          <span className="online-chip">
-            <span className="dot" />
-            {onlineCount}/{visibleSparks.length} online
-          </span>
-        </div>
-      </div>
+      {headerActionsSlot
+        ? createPortal(toolbar, headerActionsSlot)
+        : <div className="flex flex-wrap items-center justify-end gap-3">{toolbar}</div>}
+      {haproxySettings?.enabled && (
+        <HaproxyCard settings={haproxySettings} status={haproxyStatus ?? null} />
+      )}
       <div
         className={
           layout === "rows"

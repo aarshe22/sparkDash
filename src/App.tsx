@@ -10,10 +10,11 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { GearIcon, BoltIcon, DownloadIcon } from "./components/ui/icons";
+import { GearIcon, BoltIcon, DownloadIcon, PlusIcon } from "./components/ui/icons";
 import { OVERVIEW_ID } from "./constants";
 import { downloadGrokConfig, downloadOpencodeConfig } from "./lib/opencodeConfig";
 import { liveMonitoredModels } from "./lib/llmEndpoints";
+import { setDashboardPath } from "./lib/dashboardPath";
 import type { Settings, SparkSnapshot } from "./api/types";
 
 function placeholderSnapshot(
@@ -80,7 +81,7 @@ function placeholderSnapshot(
 }
 
 function DashboardApp() {
-  const { sparks, activeId, setActiveId, activeSpark, connected } = useSnapshot();
+  const { sparks, activeId, setActiveId, activeSpark, connected, haproxy } = useSnapshot();
   const navigate = useRoute(setActiveId);
   const [showAdd, setShowAdd] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
@@ -93,6 +94,7 @@ function DashboardApp() {
   const liveSparks = sparks.length > 0 ? sparks : fallbackSparks;
   /** Optimistic tab order while drag-save races the next WS snapshot */
   const [orderOverride, setOrderOverride] = useState<string[] | null>(null);
+  const [headerActionsEl, setHeaderActionsEl] = useState<HTMLDivElement | null>(null);
 
   const displaySparks = useMemo(() => {
     if (!orderOverride?.length) return liveSparks;
@@ -149,6 +151,11 @@ function DashboardApp() {
       document.documentElement.setAttribute("data-density", settings.density);
     }
   }, [settings?.density]);
+
+  useEffect(() => {
+    if (settings?.dashboardPath == null) return;
+    setDashboardPath(settings.dashboardPath);
+  }, [settings?.dashboardPath]);
 
   const refreshFromApi = useCallback(async () => {
     try {
@@ -243,7 +250,7 @@ function DashboardApp() {
               }
               aria-label="Download opencode.json"
             >
-              <DownloadIcon className="h-3 w-3" />
+              <DownloadIcon className="h-3.5 w-3.5" />
               <span>opencode.json</span>
               {liveOpencodeCount > 0 ? (
                 <span className="opencode-download-count">{liveOpencodeCount}</span>
@@ -261,22 +268,36 @@ function DashboardApp() {
               }
               aria-label="Download Grok Build config.toml"
             >
-              <DownloadIcon className="h-3 w-3" />
+              <DownloadIcon className="h-3.5 w-3.5" />
               <span>config.toml</span>
               {liveOpencodeCount > 0 ? (
                 <span className="opencode-download-count">{liveOpencodeCount}</span>
               ) : null}
             </button>
           </div>
-          <SparkTabs
-            sparks={displaySparks}
-            activeId={displayActive?.id ?? activeId}
-            onSelect={navigate}
-            onAdd={() => setShowAdd(true)}
-            onEdit={(id) => setEditId(id)}
-            onReorder={handleReorder}
-          />
+          {!isOverview && (
+            <SparkTabs
+              sparks={displaySparks}
+              activeId={displayActive?.id ?? activeId}
+              onSelect={navigate}
+              onAdd={() => setShowAdd(true)}
+              onEdit={(id) => setEditId(id)}
+              onReorder={handleReorder}
+            />
+          )}
+          {isOverview && <div ref={setHeaderActionsEl} className="dashboard-header-actions" />}
           <div className="ml-auto flex items-center gap-2.5">
+            {isOverview && (
+              <button
+                type="button"
+                onClick={() => setShowAdd(true)}
+                title="Add Spark"
+                aria-label="Add Spark"
+                className="icon-circle"
+              >
+                <PlusIcon className="h-4 w-4" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowSettings(true)}
@@ -296,6 +317,7 @@ function DashboardApp() {
               hideOffline={settings?.autoHideOffline ?? false}
               temperatureUnit={settings?.temperatureUnit ?? "celsius"}
               onSelectSpark={navigate}
+              headerActionsSlot={headerActionsEl}
               defaultLayout={
                 !settings
                   ? undefined
@@ -304,6 +326,8 @@ function DashboardApp() {
                     : "grid"
               }
               onLayoutChange={handleOverviewLayoutChange}
+              haproxySettings={settings?.haproxy}
+              haproxyStatus={haproxy}
             />
           ) : displayActive ? (
             <SparkPage

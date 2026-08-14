@@ -129,6 +129,8 @@ export interface NetworkInterface {
   ip: string | null;
   /** Interface operstate: "up" | "down" | "unknown" */
   operstate: string;
+  /** Negotiated link speed in Mbps, when the kernel reports one. */
+  speedMbps?: number | null;
   /** Present when interface is in disabledInterfaces; still returned for Settings UI */
   disabled?: boolean;
 }
@@ -411,13 +413,77 @@ export interface SparkSnapshot {
 }
 
 // ─── WebSocket envelope ───────────────────────────────────
+export interface HaproxyBackendStatus {
+  name: string;
+  status: string;
+  sessionsCurrent: number;
+  sessionsTotal: number;
+  bytesIn: number;
+  bytesOut: number;
+  errors: number;
+  checkFailures: number;
+}
+
+export interface HaproxyStatus {
+  enabled: boolean;
+  online: boolean;
+  containerStatus: string;
+  version: string | null;
+  uptimeSeconds: number | null;
+  connectionsCurrent: number;
+  sessionsTotal: number;
+  bytesIn: number;
+  bytesOut: number;
+  errorsTotal: number;
+  backends: HaproxyBackendStatus[];
+  checkedAt: number;
+  error: string | null;
+}
+
 export interface WsSnapshot {
   type: "snapshot";
   sparks: SparkSnapshot[];
+  haproxy: HaproxyStatus;
   refreshInterval: number;
 }
 
 // ─── API responses ────────────────────────────────────────
+export interface HaproxyBackendMapping {
+  name: string;
+  port: number;
+  enabled: boolean;
+}
+
+export interface HaproxySettings {
+  enabled: boolean;
+  exportEnabled: boolean;
+  domain: string;
+  remoteDockerHost: string;
+  sshPort: number;
+  sshUser: string;
+  sshAuth: "key" | "pass";
+  containerName: string;
+  statsPort: number;
+  mainConfigPath: string;
+  managedSnippetPath: string;
+  backendMappings: HaproxyBackendMapping[];
+}
+
+export interface HaproxyPreviewEndpoint {
+  name: string;
+  publicPort: number;
+  sparkId: string;
+  targetHost: string;
+  targetPort: number;
+}
+
+export interface HaproxyPreview {
+  content: string;
+  active: HaproxyPreviewEndpoint[];
+  skipped: Array<{ name: string; reason: string }>;
+  domain: string;
+}
+
 export interface Settings {
   pollIntervalMs: number;
   defaultLlmPort: number;
@@ -429,6 +495,12 @@ export interface Settings {
   density: "comfortable" | "compact";
   /** Overview cards: tiled (3 per row) or horizontal (1 per row). */
   overviewLayout: "tiled" | "horizontal";
+  /**
+   * Public URL path for this UI ("/" at site root, "/dashboard" behind a reverse proxy).
+   * Used for refresh, back/forward, and deep links.
+   */
+  dashboardPath: string;
+  haproxy: HaproxySettings;
 }
 
 export interface SparksListResponse {

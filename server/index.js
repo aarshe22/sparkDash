@@ -2,6 +2,7 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { spawn } from "child_process";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -19,6 +20,11 @@ import {
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { buildOpencodeConfig, buildGrokConfigToml } from "./opencodeConfig.js";
+import { HaproxyManager } from "./collectors/HaproxyManager.js";
+import {
+  hasHaproxyPassword,
+  setHaproxyPassword,
+} from "./secretsStore.js";
 
 dotenv.config();
 
@@ -51,6 +57,8 @@ function resolveLlmPort(sparkOrPort) {
 
 // Rate-limit ephemeral + registered connectivity tests (per client IP)
 const allowTest = createRateLimiter(20, 60_000);
+const allowHaproxyRead = createRateLimiter(60, 60_000);
+const allowHaproxyMutation = createRateLimiter(10, 60_000);
 
 // ─── Spark registry ──────────────────────────────────────
 const registry = new SparkRegistry();
@@ -98,6 +106,11 @@ function orderedSnapshots() {
     .map((m) => m.snapshot());
 }
 
+const haproxyManager = new HaproxyManager({
+  getConfig: () => getSettings().haproxy,
+  getSparks: orderedSnapshots,
+});
+
 // ─── Express app ─────────────────────────────────────────
 const app = express();
 const server = createServer(app);
@@ -106,6 +119,34 @@ app.use(express.json());
 
 function clientKey(req) {
   return req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+function hasValidAdminToken(req) {
+  const configured = process.env.SPARKDASH_ADMIN_TOKEN;
+  if (!configured) return false;
+  const auth = req.get("authorization") || "";
+  const supplied = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const expectedBuffer = Buffer.from(configured);
+  const suppliedBuffer = Buffer.from(supplied);
+  return (
+    expectedBuffer.length === suppliedBuffer.length &&
+    crypto.timingSafeEqual(expectedBuffer, suppliedBuffer)
+  );
+}
+
+function requireAdmin(req, res, next) {
+  if (!process.env.SPARKDASH_ADMIN_TOKEN) {
+    return res.status(503).json({ error: "HAProxy administration is disabled: admin token unset" });
+  }
+  if (!hasValidAdminToken(req)) return res.status(401).json({ error: "Unauthorized" });
+  next();
+}
+
+function haproxyMutationLimit(req, res, next) {
+  if (!allowHaproxyMutation(clientKey(req))) {
+    return res.status(429).json({ error: "Too many HAProxy administration requests" });
+  }
+  next();
 }
 
 // ─── REST API ────────────────────────────────────────────
@@ -249,13 +290,13 @@ app.get("/api/settings", (_req, res) => {
 });
 
 app.get("/api/opencode.json", (_req, res) => {
-  const config = buildOpencodeConfig(orderedSnapshots());
+  const config = buildOpencodeConfig(orderedSnapshots(), getSettings().haproxy);
   res.setHeader("Content-Disposition", 'attachment; filename="opencode.json"');
   res.json(config);
 });
 
 app.get("/api/config.toml", (_req, res) => {
-  const toml = buildGrokConfigToml(orderedSnapshots());
+  const toml = buildGrokConfigToml(orderedSnapshots(), getSettings().haproxy);
   res.setHeader("Content-Type", "application/toml; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="config.toml"');
   res.send(toml);
@@ -264,6 +305,19 @@ app.get("/api/config.toml", (_req, res) => {
 app.put("/api/settings", (req, res) => {
   try {
     const patch = req.body || {};
+    if (patch.haproxy != null) {
+      if (!process.env.SPARKDASH_ADMIN_TOKEN) {
+        return res
+          .status(503)
+          .json({ error: "HAProxy administration is disabled: admin token unset" });
+      }
+      if (!hasValidAdminToken(req)) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!allowHaproxyMutation(clientKey(req))) {
+        return res.status(429).json({ error: "Too many HAProxy administration requests" });
+      }
+    }
     const newSettings = updateSettings(patch);
     // If poll interval changed, restart the broadcast timer
     if (patch.pollIntervalMs != null) {
@@ -274,6 +328,100 @@ app.put("/api/settings", (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+// ─── HAProxy integration ─────────────────────────────────
+// Preview and status are read-only and never include credentials.
+app.get("/api/haproxy/preview", (req, res) => {
+  if (!allowHaproxyRead(clientKey(req))) {
+    return res.status(429).json({ error: "Too many HAProxy requests" });
+  }
+  try {
+    res.json(haproxyManager.preview());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/api/haproxy/status", async (req, res) => {
+  if (!allowHaproxyRead(clientKey(req))) {
+    return res.status(429).json({ error: "Too many HAProxy requests" });
+  }
+  const status = await haproxyManager.pollStatus({ maxAgeMs: 5_000 });
+  res.json(status);
+});
+
+app.post(
+  "/api/haproxy/test",
+  requireAdmin,
+  haproxyMutationLimit,
+  async (_req, res) => {
+    try {
+      res.json(await haproxyManager.testConnection());
+    } catch (err) {
+      res.status(502).json({ ok: false, error: err.message });
+    }
+  }
+);
+
+app.put(
+  "/api/haproxy/password",
+  requireAdmin,
+  haproxyMutationLimit,
+  (req, res) => {
+    try {
+      const password = req.body?.password;
+      if (password != null && typeof password !== "string") {
+        return res.status(400).json({ error: "password must be a string" });
+      }
+      if (typeof password === "string" && password.length > 4096) {
+        return res.status(400).json({ error: "password is too long" });
+      }
+      setHaproxyPassword(password ?? "");
+      res.json({ success: true, hasPassword: hasHaproxyPassword() });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/haproxy/apply",
+  requireAdmin,
+  haproxyMutationLimit,
+  async (req, res) => {
+    try {
+      res.json(await haproxyManager.apply({ reload: req.body?.reload !== false }));
+    } catch (err) {
+      res.status(502).json({ error: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/haproxy/reload",
+  requireAdmin,
+  haproxyMutationLimit,
+  async (_req, res) => {
+    try {
+      res.json(await haproxyManager.reload());
+    } catch (err) {
+      res.status(502).json({ error: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/haproxy/restart",
+  requireAdmin,
+  haproxyMutationLimit,
+  async (_req, res) => {
+    try {
+      res.json(await haproxyManager.restart());
+    } catch (err) {
+      res.status(502).json({ error: err.message });
+    }
+  }
+);
 
 app.get("/api/sparks/:id/metrics", (req, res) => {
   const monitor = monitors.get(req.params.id);
@@ -1023,6 +1171,7 @@ wss.on("connection", (ws) => {
 
 // ─── Broadcast snapshot (dynamic interval) ────────────────
 let broadcastTimer = null;
+let haproxyPollTimer = null;
 let _lastBroadcastPayload = null;
 
 /** Build the snapshot payload string. Centralized so broadcast + refresh share it. */
@@ -1030,6 +1179,7 @@ function buildSnapshotPayload() {
   return JSON.stringify({
     type: "snapshot",
     sparks: orderedSnapshots(),
+    haproxy: haproxyManager.getCachedStatus(),
     refreshInterval: getSettings().pollIntervalMs,
   });
 }
@@ -1080,9 +1230,20 @@ function restartBroadcast() {
   startBroadcast();
 }
 
+function startHaproxyPolling() {
+  const poll = () => {
+    haproxyManager.pollStatus({ maxAgeMs: 9_000 }).catch((err) => {
+      console.error("[haproxy] status poll failed:", err.message);
+    });
+  };
+  poll();
+  haproxyPollTimer = setInterval(poll, 10_000);
+}
+
 // ─── Start ───────────────────────────────────────────────
 loadSettings();
 startBroadcast();
+startHaproxyPolling();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[sparkDash] server listening on http://0.0.0.0:${PORT}`);
@@ -1100,6 +1261,10 @@ function shutdown(signal) {
     if (broadcastTimer) {
       clearInterval(broadcastTimer);
       broadcastTimer = null;
+    }
+    if (haproxyPollTimer) {
+      clearInterval(haproxyPollTimer);
+      haproxyPollTimer = null;
     }
     for (const m of monitors.values()) m.stop();
     monitors.clear();

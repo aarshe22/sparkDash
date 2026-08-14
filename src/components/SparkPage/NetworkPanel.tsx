@@ -1,8 +1,10 @@
 import { useState } from "react";
-import type { NetworkMetrics } from "../../api/types";
+import type { NetworkInterface, NetworkMetrics } from "../../api/types";
 import { updateDisabledInterfaces } from "../../api/client";
 import { Panel } from "../ui/Panel";
+import { Sparkline } from "../ui/Sparkline";
 import { NetworkIcon, GearIcon } from "../ui/icons";
+import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 
 interface NetworkPanelProps {
   network: NetworkMetrics | null;
@@ -16,6 +18,24 @@ function formatSpeed(bytesPerSec: number): string {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`;
   if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
   return `${bytesPerSec} B/s`;
+}
+
+function formatUtil(pct: number): string {
+  if (pct < 0.05) return "0%";
+  if (pct < 10) return `${pct.toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
+}
+
+function ifaceSpeed(iface: NetworkInterface, fallback: number | null): number | null {
+  const speed = iface.speedMbps ?? fallback;
+  return speed && speed > 0 ? speed : null;
+}
+
+function ifaceUtil(iface: NetworkInterface, fallback: number | null): number | null {
+  const speed = ifaceSpeed(iface, fallback);
+  if (!speed) return null;
+  const bits = Math.max(iface.rxSpeed, iface.txSpeed) * 8;
+  return Math.min(100, (bits / (speed * 1_000_000)) * 100);
 }
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -34,6 +54,72 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
         }`}
       />
     </button>
+  );
+}
+
+function MonitoredInterface({
+  sparkId,
+  iface,
+  isPrimary,
+  fallbackSpeed,
+}: {
+  sparkId: string;
+  iface: NetworkInterface;
+  isPrimary: boolean;
+  fallbackSpeed: number | null;
+}) {
+  const utilHist = useMetricsHistoryTail(sparkId, `net.${iface.name}.util`);
+  const speed = ifaceSpeed(iface, isPrimary ? fallbackSpeed : iface.speedMbps ?? null);
+  const util = ifaceUtil(iface, speed);
+  const down = iface.operstate !== "up";
+
+  return (
+    <div
+      className={`network-iface rounded-md border px-3 py-2.5 ${
+        isPrimary ? "border-accent/40 bg-accent-soft" : "border-border bg-surface-elevated"
+      }`}
+    >
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-xs font-medium text-text-strong">{iface.name}</span>
+            {isPrimary && (
+              <span className="shrink-0 rounded bg-accent-soft px-1 text-[9px] font-medium uppercase tracking-wide text-accent">
+                primary
+              </span>
+            )}
+            {down && (
+              <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted">
+                {iface.operstate || "down"}
+              </span>
+            )}
+          </div>
+          {iface.ip ? (
+            <div className="font-tabular truncate text-[11px] text-muted">{iface.ip}</div>
+          ) : (
+            <div className="text-[11px] text-muted">No IPv4 address</div>
+          )}
+        </div>
+        {speed != null && <span className="chip shrink-0 py-0.5">{speed} Mbps</span>}
+      </div>
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="text-muted">Utilization</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <Sparkline data={utilHist} color="var(--color-accent)" width={140} height={22} />
+          <span className="font-tabular w-12 text-right text-[13px] font-semibold text-text-strong">
+            {util != null ? formatUtil(util) : "—"}
+          </span>
+        </div>
+      </div>
+      <div className="mt-1.5 flex items-center justify-between font-tabular text-[11px] text-text">
+        <span>
+          <span className="text-accent">↑</span> {formatSpeed(iface.txSpeed)}
+        </span>
+        <span>
+          <span className="text-accent">↓</span> {formatSpeed(iface.rxSpeed)}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -66,13 +152,13 @@ export function NetworkPanel({
     }
   };
 
-  const visible = interfaces.filter(
-    (iface) => !iface.disabled && !disabledInterfaces.includes(iface.name)
-      && iface.operstate === "up" && iface.ip
-  );
-
-  const primaryVisible =
-    primary && !disabledInterfaces.includes(primary) ? primary : null;
+  const visible = interfaces
+    .filter((iface) => !iface.disabled && !disabledInterfaces.includes(iface.name))
+    .sort((a, b) => {
+      if (a.name === primary) return -1;
+      if (b.name === primary) return 1;
+      return a.name.localeCompare(b.name);
+    });
 
   return (
     <Panel
@@ -124,51 +210,23 @@ export function NetworkPanel({
           )}
         </div>
       ) : (
-        <>
-          {primaryVisible && (
-            <div className="mb-3 flex items-center gap-2 text-xs">
-              <span className="text-muted">Primary</span>
-              <span className="font-tabular text-text-strong">{primaryVisible}</span>
-              {linkSpeed != null && (
-                <span className="ml-auto chip py-0.5">{linkSpeed} Mbps</span>
-              )}
-            </div>
+        <div className="space-y-2">
+          {visible.length === 0 ? (
+            <p className="text-xs text-muted">
+              {interfaces.length === 0 ? "No interfaces" : "All adapters hidden — open settings"}
+            </p>
+          ) : (
+            visible.map((iface) => (
+              <MonitoredInterface
+                key={iface.name}
+                sparkId={sparkId}
+                iface={iface}
+                isPrimary={iface.name === primary}
+                fallbackSpeed={linkSpeed}
+              />
+            ))
           )}
-          <div className="space-y-2">
-            {visible.length === 0 ? (
-              <p className="text-xs text-muted">
-                {interfaces.length === 0 ? "No interfaces" : "All adapters hidden — open settings"}
-              </p>
-            ) : (
-              visible.map((iface) => {
-                const isPrimary = iface.name === primary;
-                return (
-                  <div
-                    key={iface.name}
-                    className={`flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between rounded-md border px-3 py-2 ${
-                      isPrimary
-                        ? "border-accent/40 bg-accent-soft"
-                        : "border-border bg-surface-elevated"
-                    }`}
-                  >
-                    <span className={`flex items-center gap-2 text-xs ${isPrimary ? "text-text-strong" : "text-text"}`}>
-                      {iface.ip ? (
-                        <span className="font-tabular truncate">{iface.ip}</span>
-                      ) : (
-                        <span className="truncate">{iface.name}</span>
-                      )}
-                    </span>
-                    <span className="font-tabular text-xs text-text">
-                      <span className="text-accent">↑</span> {formatSpeed(iface.txSpeed)}
-                      <span className="mx-1.5 text-border">·</span>
-                      <span className="text-accent">↓</span> {formatSpeed(iface.rxSpeed)}
-                    </span>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </>
+        </div>
       )}
     </Panel>
   );

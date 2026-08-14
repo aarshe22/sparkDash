@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useRef, useState } from "react";
 import { OVERVIEW_ID } from "../constants";
+import { stripDashboardPath, withDashboardPath } from "../lib/dashboardPath";
 
 export type RouteMode = "app" | "showcase";
 
@@ -7,6 +8,10 @@ export interface AppRoute {
   mode: RouteMode;
   /** Spark id for showcase mode */
   showcaseSparkId: string | null;
+}
+
+function appPathname(): string {
+  return stripDashboardPath(window.location.pathname);
 }
 
 function parsePath(pathname: string): AppRoute {
@@ -25,10 +30,10 @@ function parsePath(pathname: string): AppRoute {
  * Call once at App root so showcase skips the dashboard chrome.
  */
 export function useAppRoute(): AppRoute {
-  const [route, setRoute] = useState(() => parsePath(window.location.pathname));
+  const [route, setRoute] = useState(() => parsePath(appPathname()));
 
   useEffect(() => {
-    const handler = () => setRoute(parsePath(window.location.pathname));
+    const handler = () => setRoute(parsePath(appPathname()));
     window.addEventListener("popstate", handler);
     return () => window.removeEventListener("popstate", handler);
   }, []);
@@ -39,7 +44,7 @@ export function useAppRoute(): AppRoute {
 /**
  * useRoute — syncs the browser URL path with the active spark ID.
  *
- * URL scheme:
+ * URL scheme (under the configured dashboard path, e.g. /dashboard):
  *   /             → Overview
  *   /spark/:id    → Spark detail page
  *   /showcase/:id → full-screen showcase (handled separately via useAppRoute)
@@ -50,14 +55,13 @@ export function useAppRoute(): AppRoute {
 export function useRoute(
   setActiveId: (id: string | null) => void
 ): (id: string | null) => void {
-  // Read initial activeId from the URL on mount
   const initialised = useRef(false);
 
   useEffect(() => {
     if (initialised.current) return;
     initialised.current = true;
 
-    const path = window.location.pathname;
+    const path = appPathname();
     if (path.startsWith("/showcase/")) return;
 
     const match = path.match(/^\/spark\/([^/]+)/);
@@ -68,10 +72,9 @@ export function useRoute(
     }
   }, [setActiveId]);
 
-  // Sync back/forward navigation
   useEffect(() => {
     const handler = () => {
-      const path = window.location.pathname;
+      const path = appPathname();
       if (path.startsWith("/showcase/")) return;
       const match = path.match(/^\/spark\/([^/]+)/);
       setActiveId(match ? match[1] : OVERVIEW_ID);
@@ -80,10 +83,12 @@ export function useRoute(
     return () => window.removeEventListener("popstate", handler);
   }, [setActiveId]);
 
-  // Wrapped navigate function — updates URL + internal state
   const navigate = useCallback(
     (id: string | null) => {
-      const url = id && id !== OVERVIEW_ID ? `/spark/${encodeURIComponent(id)}` : "/";
+      const url =
+        id && id !== OVERVIEW_ID
+          ? withDashboardPath(`/spark/${encodeURIComponent(id)}`)
+          : withDashboardPath("/");
       window.history.pushState(null, "", url);
       setActiveId(id);
     },

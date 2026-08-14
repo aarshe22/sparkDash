@@ -287,7 +287,9 @@ input:disabled {
 
 /* ─── Dashboard shell (floating console) ──────────────── */
 .dashboard-shell {
-  max-width: 1440px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
   margin: 0 auto;
   background: var(--shell-gradient);
   border-radius: 32px;
@@ -300,6 +302,22 @@ input:disabled {
   flex-wrap: nowrap;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+}
+.dashboard-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.overview-header-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
   min-width: 0;
 }
 @media (max-width: 900px) {
@@ -510,6 +528,8 @@ input:disabled {
   gap: 8px;
   white-space: nowrap;
   border-radius: 9999px;
+  box-sizing: border-box;
+  min-height: 38px;
   padding: 10px 24px;
   font-size: 14px;
   font-weight: 600;
@@ -539,14 +559,16 @@ input:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 4px 10px;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 38px;
+  padding: 10px 24px;
   border: 1px solid var(--color-border);
   border-radius: 9999px;
   background: var(--color-surface-elevated);
   color: var(--color-muted);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1;
   cursor: pointer;
@@ -888,6 +910,10 @@ button.overview-card-title:hover .overview-card-model {
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   font-variant-numeric: tabular-nums;
+}
+
+.network-iface + .network-iface {
+  margin-top: 0;
 }
 
 /* ─── Online chip (overview welcome row) ──────────────── */

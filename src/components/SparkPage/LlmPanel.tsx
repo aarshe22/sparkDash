@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { LlmMetrics, SlotTelemetry, RecipeMetadata, RecipeInfo } from "../../api/types";
 import { listLlmModels, updateLlmPort, type LlmListedModel } from "../../api/client";
 import { formatContextLength } from "../../lib/llmEndpoints";
+import { withDashboardPath } from "../../lib/dashboardPath";
 import { Panel } from "../ui/Panel";
 import { TelemetryChart, type ChartSeries } from "../ui/TelemetryChart";
 import { BotIcon, GearIcon, InfoIcon, RotateIcon } from "../ui/icons";
@@ -879,7 +880,7 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
 
           <div className="border-t border-border pt-3 space-y-2">
             <button type="button" onClick={() => setBenchOpen(true)} className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-text transition-colors hover:border-accent hover:bg-accent-soft">Run decode benchmark</button>
-            <button type="button" onClick={() => { const params = new URLSearchParams(); if (llmPort) params.set("port", String(llmPort)); if (llm?.modelId) params.set("model", llm.modelId); const q = params.toString() ? `?${params.toString()}` : ""; window.open(`/showcase/${encodeURIComponent(sparkId)}${q}`, "_blank", "noopener,noreferrer"); }} className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-text transition-colors hover:border-accent hover:bg-accent-soft">Showcase</button>
+            <button type="button" onClick={() => { const params = new URLSearchParams(); if (llmPort) params.set("port", String(llmPort)); if (llm?.modelId) params.set("model", llm.modelId); const q = params.toString() ? `?${params.toString()}` : ""; window.open(withDashboardPath(`/showcase/${encodeURIComponent(sparkId)}`) + q, "_blank", "noopener,noreferrer"); }} className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-text transition-colors hover:border-accent hover:bg-accent-soft">Showcase</button>
           </div>
         </div>
       )}

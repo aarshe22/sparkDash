@@ -64,7 +64,7 @@ function sshpassAvailable() {
 export async function sshExec(spark, cmd, options = {}) {
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
-  const { host, user, auth, password } = spark.ssh || {};
+  const { host, user, auth, password, port } = spark.ssh || {};
   const targetHost = host || spark.lanIp;
 
   if (!targetHost || !user) {
@@ -90,6 +90,11 @@ export async function sshExec(spark, cmd, options = {}) {
     "-o",
     "StrictHostKeyChecking=accept-new",
   ];
+  const sshPort = port == null ? 22 : Number(port);
+  if (!Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535) {
+    throw new Error(`SSH port not allowed: ${port}`);
+  }
+  if (sshPort !== 22) baseOpts.push("-p", String(sshPort));
 
   const remote = `${user}@${targetHost}`;
   // Remote command as a single argument — ssh does not invoke a local shell for it

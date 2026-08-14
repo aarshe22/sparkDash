@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { SparkSnapshot } from "../api/types";
+import type { HaproxyStatus, SparkSnapshot } from "../api/types";
 
 /**
  * Central metrics history store (idea #8b).
@@ -29,6 +29,7 @@ const history = new Map<string, number[]>(); // key: `${sparkId}:${metric}`
 /** Cached last-N views — refreshed whenever the full series is replaced. */
 const historyTails = new Map<string, readonly number[]>();
 const sparkMap = new Map<string, SparkSnapshot>();
+let lastHaproxy: HaproxyStatus | null = null;
 const listeners = new Set<() => void>();
 
 const EMPTY: readonly number[] = Object.freeze([] as number[]);
@@ -81,7 +82,7 @@ function removeHistoryForSpark(sparkId: string) {
 }
 
 /** Ingest a full WS snapshot: update latest-per-spark + append history series. */
-export function ingestSnapshots(sparks: SparkSnapshot[]): void {
+export function ingestSnapshots(sparks: SparkSnapshot[], haproxy?: HaproxyStatus): void {
   const alive = new Set<string>();
 
   for (const s of sparks) {
@@ -106,6 +107,23 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
       }
     }
+    const netIfaces = m.network?.interfaces;
+    if (Array.isArray(netIfaces)) {
+      const fallbackSpeed = m.network?.linkSpeedMbps ?? null;
+      for (const iface of netIfaces) {
+        if (iface.disabled) continue;
+        pushHistory(`${s.id}:net.${iface.name}.rx`, iface.rxSpeed);
+        pushHistory(`${s.id}:net.${iface.name}.tx`, iface.txSpeed);
+        const speed = iface.speedMbps ?? fallbackSpeed;
+        if (speed && speed > 0) {
+          const bits = Math.max(iface.rxSpeed, iface.txSpeed) * 8;
+          const util = Math.min(100, (bits / (speed * 1_000_000)) * 100);
+          pushHistory(`${s.id}:net.${iface.name}.util`, util);
+        } else {
+          pushHistory(`${s.id}:net.${iface.name}.util`, iface.rxSpeed + iface.txSpeed);
+        }
+      }
+    }
   }
 
   // Drop series for Sparks no longer in the registry (deleted / removed from WS).
@@ -114,6 +132,49 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
       sparkMap.delete(id);
       removeHistoryForSpark(id);
     }
+  }
+
+  if (haproxy?.enabled) {
+    if (!lastHaproxy || haproxy.checkedAt !== lastHaproxy.checkedAt) {
+      pushHistory("global:haproxy.connections", haproxy.connectionsCurrent);
+      if (lastHaproxy?.enabled) {
+        pushHistory(
+          "global:haproxy.sessionsDelta",
+          Math.max(0, haproxy.sessionsTotal - lastHaproxy.sessionsTotal)
+        );
+        pushHistory(
+          "global:haproxy.bytesDelta",
+          Math.max(
+            0,
+            haproxy.bytesIn +
+              haproxy.bytesOut -
+              lastHaproxy.bytesIn -
+              lastHaproxy.bytesOut
+          )
+        );
+        pushHistory(
+          "global:haproxy.errorsDelta",
+          Math.max(0, haproxy.errorsTotal - lastHaproxy.errorsTotal)
+        );
+        for (const backend of haproxy.backends) {
+          const previous = lastHaproxy.backends.find((item) => item.name === backend.name);
+          if (!previous) continue;
+          pushHistory(
+            `global:haproxy.backend.${backend.name}.bytesDelta`,
+            Math.max(
+              0,
+              backend.bytesIn +
+                backend.bytesOut -
+                previous.bytesIn -
+                previous.bytesOut
+            )
+          );
+        }
+      }
+    }
+    lastHaproxy = haproxy;
+  } else {
+    lastHaproxy = haproxy ?? null;
   }
 
   // Always notify: sparkMap refs refresh every frame (online flips included),
@@ -161,6 +222,16 @@ export function useMetricsHistoryTail(sparkId: string, metric: string): readonly
   );
 }
 
+/** Subscribe to a global (non-Spark) metric history. */
+export function useGlobalMetricsHistoryTail(metric: string): readonly number[] {
+  const key = `global:${metric}`;
+  return useSyncExternalStore(
+    subscribeMetrics,
+    () => getHistoryTail(key),
+    () => EMPTY
+  );
+}
+
 /**
  * Subscribe to one spark's latest snapshot. Re-renders when that spark's
  * cached object is replaced (every WS frame that includes it).
@@ -178,4 +249,5 @@ export function _resetStore(): void {
   history.clear();
   historyTails.clear();
   sparkMap.clear();
+  lastHaproxy = null;
 }

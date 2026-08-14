@@ -738,6 +738,7 @@ export class SystemCollector {
         txSpeed: Math.max(0, Math.round(txSpeed)),
         ip: ipMap.get(iface) || null,
         operstate: await this._getInterfaceOperstate(iface),
+        speedMbps: await this._getNetworkLinkSpeedMbps(iface),
         disabled: false,
       });
     }
@@ -758,7 +759,8 @@ export class SystemCollector {
         const first = block.split("\n")[0];
         const m = first.match(/^\d+:\s+(\S+):/);
         if (!m) continue;
-        const iface = m[1];
+        // `ip addr` names VLANs as vlan101@eno1np0; /proc/net/dev uses vlan101.
+        const iface = String(m[1]).split("@")[0];
         const ipMatch = block.match(/inet\s+([\d.]+)/);
         if (ipMatch) {
           map.set(iface, ipMatch[1]);
@@ -1124,6 +1126,8 @@ export class SystemCollector {
         "echo '---'",
         // WoL MAC for the primary LAN NIC on DGX Spark
         `cat /sys/class/net/${WOL_INTERFACE}/address 2>/dev/null || true`,
+        "echo '---'",
+        "for d in /sys/class/net/*/speed; do echo \"$(basename $(dirname $d)):$(cat $d 2>/dev/null || echo)\"; done",
       ].join("; ");
 
       const output = await sshExec(this.spark, cmd);
@@ -1133,6 +1137,7 @@ export class SystemCollector {
       const ipOut = sections[2]?.trim() || "";
       const operstateOut = sections[3]?.trim() || "";
       const wolMac = normalizeMac(sections[4]?.trim() || "");
+      const speedOut = sections[5]?.trim() || "";
 
       // Parse operstate lines ("enP7s7:up")
       const operstateMap = new Map();
@@ -1150,11 +1155,19 @@ export class SystemCollector {
         const first = block.split("\n")[0];
         const m = first.match(/^\d+:\s+(\S+):/);
         if (!m) continue;
-        const iface = m[1];
+        const iface = String(m[1]).split("@")[0];
         const ipMatch = block.match(/inet\s+([\d.]+)/);
         if (ipMatch) {
           ipMap.set(iface, ipMatch[1]);
         }
+      }
+
+      const speedMap = new Map();
+      for (const line of speedOut.split("\n")) {
+        const idx = line.indexOf(":");
+        if (idx <= 0) continue;
+        const n = parseInt(line.slice(idx + 1).trim(), 10);
+        if (Number.isFinite(n) && n > 0) speedMap.set(line.slice(0, idx), n);
       }
 
       // Parse /proc/net/dev
@@ -1180,6 +1193,7 @@ export class SystemCollector {
           txSpeed: Math.max(0, Math.round(txSpeed)),
           ip: ipMap.get(iface) || null,
           operstate: operstateMap.get(iface) || "unknown",
+          speedMbps: speedMap.get(iface) || null,
           disabled: false,
         });
       }
@@ -1202,8 +1216,8 @@ export class SystemCollector {
         primaryInterface = alt?.name ?? primaryInterface;
       }
 
-      let linkSpeedMbps = null;
-      if (primaryInterface) {
+      let linkSpeedMbps = primaryInterface ? speedMap.get(primaryInterface) || null : null;
+      if (primaryInterface && linkSpeedMbps == null) {
         try {
           // Interface name is from the kernel; still keep it to safe chars
           if (/^[a-zA-Z0-9._-]+$/.test(primaryInterface)) {
