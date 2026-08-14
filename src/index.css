@@ -514,7 +514,7 @@ input:disabled {
   font-weight: 400;
 }
 
-/* Brand column: logo pill + OpenCode config download under it */
+/* Brand column: logo pill + config downloads under it */
 .logo-brand {
   display: inline-flex;
   flex-direction: column;
@@ -695,6 +695,80 @@ input[type="checkbox"] {
   box-shadow: var(--shadow-card-hover);
   border-color: var(--color-border-strong);
   transform: translateY(-1px);
+}
+
+.overview-layout-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-surface-elevated);
+}
+.overview-layout-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.overview-layout-toggle button + button {
+  border-left: 1px solid var(--color-border);
+}
+.overview-layout-toggle button:hover {
+  color: var(--color-text);
+}
+.overview-layout-toggle button.is-active {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.overview-page.is-rows {
+  grid-template-columns: 1fr !important;
+}
+
+.overview-card--row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+.overview-card--row .overview-card-head {
+  flex: 0 1 220px;
+  min-width: 160px;
+}
+.overview-card--row .overview-card-bars {
+  flex: 1 1 320px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
+  gap: 10px 14px;
+  min-width: 0;
+}
+.overview-card--row .overview-card-stats,
+.overview-card--row .overview-card-ports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  flex: 1 1 180px;
+}
+.overview-card--row .overview-card-tps {
+  margin: 0;
+  padding: 0;
+  border: none;
+  text-align: right;
+  flex: 0 0 auto;
+}
+.overview-card--row .overview-card-tps .overview-card-tps-value {
+  font-size: 22px;
 }
 
 /* ─── Pulse / glow accents ─────────────────────────────── */

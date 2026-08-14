@@ -159,6 +159,17 @@ export function GridIcon({ className = "" }: { className?: string }) {
   );
 }
 
+/** Three stacked rows — one card per row (horizontal cards). */
+export function RowsIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <rect x="3" y="4" width="18" height="4" rx="1" />
+      <rect x="3" y="10" width="18" height="4" rx="1" />
+      <rect x="3" y="16" width="18" height="4" rx="1" />
+    </svg>
+  );
+}
+
 export function MemoryIcon({ className = "" }: { className?: string }) {
   return (
     <svg {...baseProps(className)}>

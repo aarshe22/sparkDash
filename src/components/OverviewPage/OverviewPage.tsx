@@ -1,16 +1,40 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { isLlmMonitoringEnabled, resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
 import { MetricBar } from "../ui/MetricBar";
-import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { ActivityIcon, GridIcon, PowerOffIcon, PowerOnIcon, RowsIcon } from "../ui/icons";
 import { formatContextLength, sparkLlmEndpoints } from "../../lib/llmEndpoints";
+
+const OVERVIEW_LAYOUT_KEY = "sparkdash.ui.overviewLayout";
+
+type OverviewLayout = "grid" | "rows";
+
+function readOverviewLayout(): OverviewLayout {
+  try {
+    const raw = localStorage.getItem(OVERVIEW_LAYOUT_KEY);
+    if (raw === "rows" || raw === "grid") return raw;
+  } catch {
+    /* private mode / blocked storage */
+  }
+  return "grid";
+}
+
+function writeOverviewLayout(layout: OverviewLayout) {
+  try {
+    localStorage.setItem(OVERVIEW_LAYOUT_KEY, layout);
+  } catch {
+    /* ignore */
+  }
+}
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
   hideOffline?: boolean;
   temperatureUnit?: "celsius" | "fahrenheit";
   onSelectSpark?: (id: string) => void;
+  defaultLayout?: OverviewLayout;
+  onLayoutChange?: (layout: OverviewLayout) => void;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -69,12 +93,15 @@ function SparkCard({
   headSparkName,
   temperatureUnit,
   onSelect,
+  layout,
 }: {
   spark: SparkSnapshot;
   headSparkName?: string | null;
   temperatureUnit: "celsius" | "fahrenheit";
   onSelect?: (id: string) => void;
+  layout: OverviewLayout;
 }) {
+  const horizontal = layout === "rows";
   const gpu = spark.metrics.gpu;
   const um = spark.metrics.unifiedMemory;
   const online = spark.online;
@@ -98,7 +125,7 @@ function SparkCard({
 
   return (
     <div
-      className="overview-card flex flex-col"
+      className={`overview-card ${horizontal ? "overview-card--row" : "flex flex-col"}`}
       style={{
         padding: "var(--density-card-pad)",
         gap: "var(--density-card-gap)",
@@ -106,7 +133,7 @@ function SparkCard({
       }}
     >
       {/* Card header */}
-      <div className="flex items-center gap-2.5">
+      <div className="overview-card-head flex items-center gap-2.5">
         <span
           className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-success dot-glow-success" : "bg-danger"}`}
         />
@@ -123,29 +150,6 @@ function SparkCard({
             spark.name
           )}
         </span>
-        {(() => {
-          const role = resolveSparkRole(spark);
-          const text =
-            role === "head" ? "Head" : role === "worker" ? "Worker" : "Standalone";
-          const title =
-            role === "head"
-              ? "Cluster head Spark"
-              : role === "worker"
-                ? spark.workerLabel?.trim()
-                  ? `${spark.workerLabel.trim()} · distributed LLM worker`
-                  : "Distributed LLM worker"
-                : spark.llmMonitoring === false
-                  ? "Standalone — LLM monitoring off"
-                  : "Standalone Spark";
-          return (
-            <span
-              className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
-              title={title}
-            >
-              {text}
-            </span>
-          );
-        })()}
         <span className="text-[10px] uppercase tracking-wide text-muted">
           {online ? "online" : "offline"}
         </span>
@@ -160,7 +164,7 @@ function SparkCard({
       ) : (
         <>
           {/* Three headline bars: GPU alloc, Temp, Usage */}
-          <div className="flex flex-col gap-3.5">
+          <div className={horizontal ? "overview-card-bars" : "flex flex-col gap-3.5"}>
             <MetricBar
               label="VRAM"
               value={vramUsed}
@@ -185,7 +189,13 @@ function SparkCard({
           </div>
 
           {/* Secondary stats */}
-          <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+          <div
+            className={
+              horizontal
+                ? "overview-card-stats"
+                : "mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5"
+            }
+          >
             <MiniStat
               label="GPU Power"
               value={`${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`}
@@ -255,7 +265,13 @@ function SparkCard({
             const rows = sparkLlmEndpoints(spark);
             if (rows.length === 0) return null;
             return (
-              <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+              <div
+                className={
+                  horizontal
+                    ? "overview-card-ports"
+                    : "mt-3.5 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5"
+                }
+              >
                 {rows.map((row) => (
                   <div key={row.port} className="contents">
                     <MiniStat
@@ -284,8 +300,14 @@ function SparkCard({
             const llm = sparkLlmEndpoints(spark).find((l) => l.available);
             if (!llm) return null;
             return (
-              <div className="mt-3.5 border-t border-border pt-3 text-center">
-                <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
+              <div
+                className={
+                  horizontal
+                    ? "overview-card-tps"
+                    : "mt-3.5 border-t border-border pt-3 text-center"
+                }
+              >
+                <span className="overview-card-tps-value font-tabular text-[28px] font-bold leading-none text-text-strong">
                   {llm.generationTps.toFixed(0)}
                 </span>
                 <span className="text-sm font-normal text-muted"> tok/s</span>
@@ -298,10 +320,28 @@ function SparkCard({
   );
 }
 
-export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "celsius", onSelectSpark }: OverviewPageProps) {
+export function OverviewPage({
+  sparks,
+  hideOffline = false,
+  temperatureUnit = "celsius",
+  onSelectSpark,
+  defaultLayout,
+  onLayoutChange,
+}: OverviewPageProps) {
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
+  const [layout, setLayout] = useState<OverviewLayout>(defaultLayout ?? readOverviewLayout);
+
+  useEffect(() => {
+    if (defaultLayout) setLayout(defaultLayout);
+  }, [defaultLayout]);
+
+  function changeLayout(next: OverviewLayout) {
+    setLayout(next);
+    writeOverviewLayout(next);
+    onLayoutChange?.(next);
+  }
 
   async function handleShutdownAll() {
     const onlineCount = sparks.filter((s) => s.online).length;
@@ -394,6 +434,28 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           )}
           {sparks.length > 0 && (
             <div className="flex items-center gap-1.5">
+              <div className="overview-layout-toggle" role="group" aria-label="Overview card layout">
+                <button
+                  type="button"
+                  className={layout === "grid" ? "is-active" : ""}
+                  onClick={() => changeLayout("grid")}
+                  title="Vertical cards · 3 per row"
+                  aria-pressed={layout === "grid"}
+                  aria-label="Vertical cards, 3 per row"
+                >
+                  <GridIcon className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  className={layout === "rows" ? "is-active" : ""}
+                  onClick={() => changeLayout("rows")}
+                  title="Horizontal cards · 1 per row"
+                  aria-pressed={layout === "rows"}
+                  aria-label="Horizontal cards, 1 per row"
+                >
+                  <RowsIcon className="h-3.5 w-3.5" />
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => void handleWakeAll()}
@@ -422,7 +484,14 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           </span>
         </div>
       </div>
-      <div className="overview-page grid grid-cols-2 lg:grid-cols-4" style={{ gap: "var(--density-page-gap)" }}>
+      <div
+        className={
+          layout === "rows"
+            ? "overview-page is-rows grid grid-cols-1"
+            : "overview-page grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3"
+        }
+        style={{ gap: "var(--density-page-gap)" }}
+      >
         {visibleSparks.map((spark) => (
           <SparkCard
             key={spark.id}
@@ -434,6 +503,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
             }
             temperatureUnit={temperatureUnit}
             onSelect={onSelectSpark}
+            layout={layout}
           />
         ))}
       </div>

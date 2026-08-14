@@ -377,14 +377,6 @@ export class SparkMonitor {
 
   // ─── Hardware summary (cached, computed once) ─────────────
   _getHardwareSummary() {
-    return {
-      device: "NVIDIA DGX Spark",
-      cpuModel: "GB10",
-      cpuCores: 20,
-      totalMemoryGB: 128,
-      gpuChip: "GB10",
-      cudaDriver: null,
-      storageModel: null,
-    };
+    return this.collector.getHardwareSummary();
   }
 }

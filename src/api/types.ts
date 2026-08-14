@@ -427,6 +427,8 @@ export interface Settings {
   benchDebugTraces: boolean;
   /** Layout density — comfortable (default) or compact. */
   density: "comfortable" | "compact";
+  /** Overview cards: tiled (3 per row) or horizontal (1 per row). */
+  overviewLayout: "tiled" | "horizontal";
 }
 
 export interface SparksListResponse {

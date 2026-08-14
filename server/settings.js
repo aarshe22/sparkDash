@@ -19,6 +19,8 @@ const DEFAULTS = Object.freeze({
   benchDebugTraces: false,
   /** Layout density — comfortable (default) or compact. */
   density: "comfortable",
+  /** Overview cards: tiled (3 per row) or horizontal (1 per row). */
+  overviewLayout: "tiled",
 });
 
 /** @type {typeof DEFAULTS} */
@@ -45,6 +47,9 @@ function _clampSettings(settings) {
   // Ensure density is valid
   if (s.density !== "comfortable" && s.density !== "compact") {
     s.density = DEFAULTS.density;
+  }
+  if (s.overviewLayout !== "tiled" && s.overviewLayout !== "horizontal") {
+    s.overviewLayout = DEFAULTS.overviewLayout;
   }
   return s;
 }

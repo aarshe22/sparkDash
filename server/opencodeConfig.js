@@ -51,6 +51,14 @@ function providerId(sparkId, port) {
   return `sparkdash-${id}-${port}`;
 }
 
+function grokModelKey(sparkId, port) {
+  return providerId(sparkId, port).replace(/\./g, "-");
+}
+
+function tomlString(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 /**
  * @param {object[]} sparks Spark snapshots (same shape as the WS payload)
  * @returns {object} OpenCode config JSON
@@ -85,4 +93,40 @@ export function buildOpencodeConfig(sparks) {
     ...(model ? { model } : {}),
     provider,
   };
+}
+
+/**
+ * @param {object[]} sparks Spark snapshots (same shape as the WS payload)
+ * @returns {string} Grok Build config.toml
+ */
+export function buildGrokConfigToml(sparks) {
+  const live = liveMonitoredModels(sparks);
+  const lines = [
+    "# sparkDash export for Grok Build.",
+    "# Merge [model.*] into ~/.grok/config.toml, then: grok models && grok -m <key>",
+    "",
+  ];
+  let defaultKey;
+  for (const ep of live) {
+    const key = grokModelKey(ep.sparkId, ep.port);
+    if (!defaultKey) defaultKey = key;
+    const context = ep.contextLength != null && ep.contextLength > 0 ? ep.contextLength : null;
+    lines.push(`[model.${key}]`);
+    lines.push(`model = ${tomlString(ep.modelId)}`);
+    lines.push(`base_url = ${tomlString(`http://${ep.lanIp}:${ep.port}/v1`)}`);
+    lines.push(`name = ${tomlString(`${ep.sparkName} (:${ep.port})`)}`);
+    lines.push(`api_backend = "chat_completions"`);
+    lines.push(`api_key = "not-needed"`);
+    if (context) {
+      lines.push(`context_window = ${context}`);
+      lines.push(`max_completion_tokens = ${Math.min(65536, context)}`);
+    }
+    lines.push("");
+  }
+  if (defaultKey) {
+    lines.push("[models]");
+    lines.push(`default = ${tomlString(defaultKey)}`);
+    lines.push("");
+  }
+  return lines.join("\n");
 }

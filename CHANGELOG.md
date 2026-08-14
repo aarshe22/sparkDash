@@ -13,6 +13,7 @@ Format: version sections are listed newest first.
 - **Overview cards show LLM port and context length** for each monitored endpoint
 - **Downloadable `opencode.json`** under the sparkDash logo — live OpenAI-compatible provider entries (LAN IP, port, model id, max context) for every monitored, reachable model
 - **`GET /api/opencode.json`** — same config as an attachment for curl / automation
+- **Non-Spark GPU hosts** — remote Linux boxes with discrete NVIDIA GPUs (e.g. Lambda + RTX PRO 6000) are monitored over SSH the same way as Sparks; VRAM uses nvidia-smi framebuffer size instead of GB10 unified memory
 
 ### Changed
 - Overview grid is **two cards across** on smaller screens and **four across** from the `lg` breakpoint (phones still stack one-wide)

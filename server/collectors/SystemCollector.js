@@ -30,8 +30,10 @@ export class SystemCollector {
     // GPU VRAM per-PID cache
     this.nvidiaComputeAppsCache = new Map();
 
-    // Cached hardware info
+    // Cached hardware info (filled after the first successful GPU poll)
     this._hardwareInfo = null;
+    /** True when nvidia-smi reports a real framebuffer size (discrete GPU). */
+    this._discreteVram = false;
   }
 
   /** Collect GPU metrics (temperature, usage, power, VRAM). */
@@ -135,14 +137,16 @@ export class SystemCollector {
     const gpu = this._parseGpuLine(gpuOut);
     const vram = await this._queryNvidiaVram();
 
-    // Estimate total system power: GPU draw + CPU draw + ~20W CX7/peripherals
+    // Estimate total system power: GPU draw + CPU draw (+ CX7 on DGX Spark)
     let systemDraw = gpu.powerDraw;
     try {
       const cpuPower = await this._getCPUPower();
       systemDraw += cpuPower.draw;
     } catch {}
-    systemDraw += 20; // CX7 NIC + peripherals estimate
+    if (!this._discreteVram) systemDraw += 20; // CX7 NIC + peripherals on Spark
     systemDraw = Math.round(systemDraw);
+
+    await this._refreshLocalHardware();
 
     // Top 5 GPU processes by VRAM usage
     const processes = Array.from(this.nvidiaComputeAppsCache.entries())
@@ -176,7 +180,6 @@ export class SystemCollector {
   async _queryNvidiaVram({ computeOut = null } = {}) {
     let used = null;
     let total = null;
-    let availableMB = 0;
 
     try {
       const memOut = await this._nvidiaSmi(
@@ -247,28 +250,129 @@ export class SystemCollector {
     }
     if (total == null && file.total > 0) total = file.total;
 
-    // Unified-memory pool size + actual available memory from /proc/meminfo.
-    // This matches the Unified Memory panel's basis so the two read consistently.
     const { totalMB: memTotalMB, availMB } = await this._readMeminfoMB();
-    availableMB = availMB;
+    return this._finalizeVram({
+      smiUsed: used,
+      smiTotal: total,
+      computeSum,
+      memTotalMB,
+      availMB,
+    });
+  }
 
-    // Prefer the OS-visible pool (MemTotal) as the total; fall back to the nvidia-smi
-    // value, then the hardware spec (HBM) only if nothing else is known.
-    if (memTotalMB > 0) {
-      total = memTotalMB;
-    } else if (total == null || total === 0) {
-      total = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
+  /**
+   * Discrete GPUs (RTX PRO, etc.) report a real nvidia-smi framebuffer size.
+   * GB10 unified memory reports [N/A] — keep the MemTotal-based pool there.
+   */
+  _finalizeVram({ smiUsed, smiTotal, computeSum = 0, memTotalMB = 0, availMB = 0 }) {
+    const discrete = smiTotal != null && smiTotal > 0;
+    this._discreteVram = discrete;
+
+    let used = smiUsed;
+    let total = smiTotal;
+    let availableMB = availMB || 0;
+
+    if (used == null || used === 0) used = computeSum;
+
+    if (discrete) {
+      availableMB = Math.max(0, Math.round((total || 0) - (used || 0)));
+    } else {
+      if (memTotalMB > 0) total = memTotalMB;
+      else if (total == null || total === 0) total = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024;
+      if ((used == null || used === 0) && memTotalMB > 0 && availMB > 0) {
+        used = memTotalMB - availMB;
+      }
+      availableMB = availMB || 0;
     }
 
-    // GB10 fallback: if nvidia-smi memory + compute-apps both fail, derive used from meminfo
-    if ((used == null || used === 0) && memTotalMB > 0 && availMB > 0) {
-      used = memTotalMB - availMB;
-    }
     const usedMB = Math.round(used || 0);
     const totalMB = Math.round(total || 0);
     const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
-
     return { used: usedMB, total: totalMB, percentage, available: availableMB };
+  }
+
+  _parseCpuModel(cpuinfo) {
+    if (!cpuinfo) return null;
+    const model = cpuinfo.match(/^model name\s*:\s*(.+)$/m);
+    if (model) return model[1].trim();
+    const hw = cpuinfo.match(/^Hardware\s*:\s*(.+)$/m);
+    if (hw) return hw[1].trim();
+    return null;
+  }
+
+  _countCpuCores(cpuinfo) {
+    if (!cpuinfo) return 0;
+    const procs = cpuinfo.match(/^processor\s*:/gm);
+    if (procs?.length) return procs.length;
+    return 0;
+  }
+
+  /**
+   * @param {{ gpuName?: string, driver?: string, cores?: number, memTotalMB?: number, cpuModel?: string }} info
+   */
+  _noteHardware(info = {}) {
+    const gpuName = (info.gpuName || "").trim();
+    const driver = (info.driver || "").trim() || null;
+    const cores = Number(info.cores) || 0;
+    const memGB = info.memTotalMB > 0 ? Math.round(info.memTotalMB / 1024) : 0;
+    const cpuModel = (info.cpuModel || "").trim() || null;
+    const discrete = Boolean(this._discreteVram);
+
+    if (discrete) {
+      this._hardwareInfo = {
+        device: gpuName || "NVIDIA GPU host",
+        cpuModel: cpuModel || "x86_64",
+        cpuCores: cores,
+        totalMemoryGB: memGB,
+        gpuChip: driver || "discrete GPU",
+        cudaDriver: driver,
+        storageModel: null,
+      };
+      return;
+    }
+
+    this._hardwareInfo = {
+      device: "NVIDIA DGX Spark",
+      cpuModel: cpuModel || "GB10",
+      cpuCores: cores || 20,
+      totalMemoryGB: memGB || 128,
+      gpuChip: gpuName && !/GB10|DGX/i.test(gpuName) ? gpuName : "GB10",
+      cudaDriver: driver,
+      storageModel: null,
+    };
+  }
+
+  getHardwareSummary() {
+    return (
+      this._hardwareInfo || {
+        device: "NVIDIA DGX Spark",
+        cpuModel: "GB10",
+        cpuCores: 20,
+        totalMemoryGB: 128,
+        gpuChip: "GB10",
+        cudaDriver: null,
+        storageModel: null,
+      }
+    );
+  }
+
+  async _refreshLocalHardware() {
+    try {
+      const ident = await this._nvidiaSmi("--query-gpu=name,driver_version --format=csv,noheader");
+      const line = (ident.trim().split("\n").filter(Boolean)[0] || "");
+      const parts = line.split(",").map((s) => s.trim());
+      const cpuinfo = await this._readHostFile("/proc/cpuinfo");
+      const mem = await this._readMeminfoMB();
+      this._noteHardware({
+        gpuName: parts[0],
+        driver: parts[1],
+        cores: this._countCpuCores(cpuinfo),
+        memTotalMB: mem.totalMB,
+        cpuModel: this._parseCpuModel(cpuinfo),
+      });
+    } catch {
+      /* identity is optional */
+    }
   }
 
   /** Parse nvidia-smi numeric field; treat [N/A] / empty as null. */
@@ -823,6 +927,12 @@ export class SystemCollector {
         "nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null",
         "echo '---'",
         "grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null",
+        "echo '---'",
+        "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null",
+        "echo '---'",
+        "nproc 2>/dev/null",
+        "echo '---'",
+        "grep -E 'model name|^processor|^Hardware' /proc/cpuinfo 2>/dev/null | head -80",
       ].join("; ");
 
       const output = await sshExec(this.spark, cmd);
@@ -831,16 +941,17 @@ export class SystemCollector {
       const memFields = sections[1]?.trim() || "";
       const computeOut = sections[2]?.trim() || "";
       const meminfoOut = sections[3]?.trim() || "";
+      const identOut = sections[4]?.trim() || "";
+      const nprocOut = sections[5]?.trim() || "";
+      const cpuinfoOut = sections[6]?.trim() || "";
 
       const gpu = this._parseGpuLine(gpuOut);
 
       // Parse memory.used / memory.total from nvidia-smi (may be [N/A] on GB10)
-      let used = null;
-      let total = null;
       const memLine = memFields.split("\n").filter(Boolean)[0] || "";
       const memParts = memLine.split(",").map((s) => s.trim());
-      used = this._parseSmiNumber(memParts[0]);
-      total = this._parseSmiNumber(memParts[1]);
+      const smiUsed = this._parseSmiNumber(memParts[0]);
+      const smiTotal = this._parseSmiNumber(memParts[1]);
 
       const apps = this._parseComputeApps(computeOut);
       this.nvidiaComputeAppsCache.clear();
@@ -849,29 +960,32 @@ export class SystemCollector {
         this.nvidiaComputeAppsCache.set(app.pid, { name: app.name, vramMB: app.vramMB });
         computeSum += app.vramMB;
       }
-      if ((used == null || used === 0) && computeSum > 0) used = computeSum;
 
-      // Unified-memory pool: prefer MemTotal (OS-visible) so VRAM and Unified
-      // Memory panels share the same base. Available = MemAvailable (real free).
       const totalMatch = meminfoOut.match(/MemTotal:\s+(\d+)\s+kB/);
       const availMatch = meminfoOut.match(/MemAvailable:\s+(\d+)\s+kB/);
       const memTotalMB = totalMatch ? Math.round(parseInt(totalMatch[1]) / 1024) : 0;
-      const availableMB = availMatch ? Math.round(parseInt(availMatch[1]) / 1024) : 0;
+      const availMB = availMatch ? Math.round(parseInt(availMatch[1]) / 1024) : 0;
 
-      if (memTotalMB > 0) {
-        total = memTotalMB;
-      } else if (total == null || total === 0) {
-        total = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
-      }
+      const vram = this._finalizeVram({
+        smiUsed,
+        smiTotal,
+        computeSum,
+        memTotalMB,
+        availMB,
+      });
 
-      const usedMB = Math.round(used || 0);
-      const totalMB = Math.round(total || 0);
-      const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
+      const identLine = identOut.split("\n").filter(Boolean)[0] || "";
+      const identParts = identLine.split(",").map((s) => s.trim());
+      this._noteHardware({
+        gpuName: identParts[0],
+        driver: identParts[1],
+        cores: parseInt(nprocOut, 10) || this._countCpuCores(cpuinfoOut),
+        memTotalMB,
+        cpuModel: this._parseCpuModel(cpuinfoOut),
+      });
 
-      // Rough system power estimate: GPU draw + 20W CX7/peripherals
-      const systemDraw = Math.round(gpu.powerDraw + 20);
+      const systemDraw = Math.round(gpu.powerDraw + (this._discreteVram ? 0 : 20));
 
-      // Top 5 GPU processes by VRAM usage
       const processes = Array.from(this.nvidiaComputeAppsCache.entries())
         .map(([pid, info]) => ({ pid, name: info.name, vramMB: info.vramMB }))
         .sort((a, b) => b.vramMB - a.vramMB)
@@ -881,7 +995,7 @@ export class SystemCollector {
         temperature: gpu.temperature,
         usage: gpu.usage,
         power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
-        vram: { used: usedMB, total: totalMB, percentage, available: availableMB },
+        vram,
         processes,
       };
     } catch (err) {

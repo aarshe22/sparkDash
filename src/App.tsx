@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { useAppRoute, useRoute } from "./hooks/useRoute";
-import { fetchSparks, reorderSparks, fetchSettings } from "./api/client";
+import { fetchSparks, reorderSparks, fetchSettings, updateSettings } from "./api/client";
 import { SparkTabs } from "./components/SparkTabs";
 import { AddSparkDialog } from "./components/AddSparkDialog";
 import { EditSparkDialog } from "./components/EditSparkDialog";
@@ -12,7 +12,7 @@ import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { GearIcon, BoltIcon, DownloadIcon } from "./components/ui/icons";
 import { OVERVIEW_ID } from "./constants";
-import { downloadOpencodeConfig } from "./lib/opencodeConfig";
+import { downloadGrokConfig, downloadOpencodeConfig } from "./lib/opencodeConfig";
 import { liveMonitoredModels } from "./lib/llmEndpoints";
 import type { Settings, SparkSnapshot } from "./api/types";
 
@@ -136,6 +136,13 @@ function DashboardApp() {
     setSettings(s);
   }, []);
 
+  const handleOverviewLayoutChange = useCallback((layout: "grid" | "rows") => {
+    const overviewLayout = layout === "rows" ? "horizontal" : "tiled";
+    void updateSettings({ overviewLayout })
+      .then(setSettings)
+      .catch((err) => console.error("Failed to save overview layout:", err));
+  }, []);
+
   // Apply layout density (comfortable/compact) from persisted settings.
   useEffect(() => {
     if (settings?.density) {
@@ -205,6 +212,9 @@ function DashboardApp() {
   const handleDownloadOpencode = useCallback(() => {
     downloadOpencodeConfig(displaySparks);
   }, [displaySparks]);
+  const handleDownloadGrok = useCallback(() => {
+    downloadGrokConfig(displaySparks);
+  }, [displaySparks]);
 
   return (
     <div className="min-h-screen p-0 text-text sm:p-8">
@@ -239,6 +249,24 @@ function DashboardApp() {
                 <span className="opencode-download-count">{liveOpencodeCount}</span>
               ) : null}
             </button>
+            <button
+              type="button"
+              className="opencode-download"
+              onClick={handleDownloadGrok}
+              disabled={liveOpencodeCount === 0}
+              title={
+                liveOpencodeCount === 0
+                  ? "No live monitored models to export"
+                  : `Download Grok Build config.toml for ${liveOpencodeCount} live model${liveOpencodeCount === 1 ? "" : "s"}`
+              }
+              aria-label="Download Grok Build config.toml"
+            >
+              <DownloadIcon className="h-3 w-3" />
+              <span>config.toml</span>
+              {liveOpencodeCount > 0 ? (
+                <span className="opencode-download-count">{liveOpencodeCount}</span>
+              ) : null}
+            </button>
           </div>
           <SparkTabs
             sparks={displaySparks}
@@ -268,6 +296,14 @@ function DashboardApp() {
               hideOffline={settings?.autoHideOffline ?? false}
               temperatureUnit={settings?.temperatureUnit ?? "celsius"}
               onSelectSpark={navigate}
+              defaultLayout={
+                !settings
+                  ? undefined
+                  : settings.overviewLayout === "horizontal"
+                    ? "rows"
+                    : "grid"
+              }
+              onLayoutChange={handleOverviewLayoutChange}
             />
           ) : displayActive ? (
             <SparkPage

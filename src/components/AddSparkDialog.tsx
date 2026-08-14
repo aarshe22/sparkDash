@@ -152,6 +152,9 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
               className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
               placeholder="My Spark"
             />
+            <p className="mt-1 text-[10px] text-muted">
+              Any Linux host with SSH and nvidia-smi works — DGX Spark, discrete GPU servers (Lambda / RTX), etc.
+            </p>
           </div>
 
           <div>
@@ -163,6 +166,9 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
               className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
               placeholder="192.168.1.100"
             />
+            <p className="mt-1 text-[10px] text-muted">
+              Address the dashboard can reach for SSH and the LLM HTTP port. Leave “local machine” unchecked for a remote box.
+            </p>
           </div>
 
           <div>

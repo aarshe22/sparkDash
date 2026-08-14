@@ -17,7 +17,7 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
-import { buildOpencodeConfig } from "./opencodeConfig.js";
+import { buildOpencodeConfig, buildGrokConfigToml } from "./opencodeConfig.js";
 
 dotenv.config();
 
@@ -251,6 +251,13 @@ app.get("/api/opencode.json", (_req, res) => {
   const config = buildOpencodeConfig(orderedSnapshots());
   res.setHeader("Content-Disposition", 'attachment; filename="opencode.json"');
   res.json(config);
+});
+
+app.get("/api/config.toml", (_req, res) => {
+  const toml = buildGrokConfigToml(orderedSnapshots());
+  res.setHeader("Content-Type", "application/toml; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="config.toml"');
+  res.send(toml);
 });
 
 app.put("/api/settings", (req, res) => {
