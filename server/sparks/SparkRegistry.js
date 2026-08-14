@@ -3,6 +3,7 @@ import { SPARKS_JSON_PATH, LLM_PORT } from "../config.js";
 import { loadSecrets, saveSecrets } from "../secretsStore.js";
 import { atomicWrite } from "../util/atomicWrite.js";
 import { isValidSparkId } from "../validate.js";
+import { normalizeLlmEngine } from "../llmEngine.js";
 
 /**
  * SparkRegistry — loads, persists, and emits change events for the Spark list.
@@ -353,6 +354,11 @@ export class SparkRegistry {
        */
       llmMonitoring:
         role === "worker" ? false : role === "head" ? true : config.llmMonitoring !== false,
+      /**
+       * Which OpenAI-compatible engine to probe: vllm | sglang | auto.
+       * Auto detects SGLang before falling back to vLLM.
+       */
+      llmEngine: isWorker ? "auto" : normalizeLlmEngine(config.llmEngine),
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),

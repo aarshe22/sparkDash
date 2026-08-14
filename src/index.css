@@ -767,6 +767,29 @@ button.overview-card-title:hover .overview-card-model {
   letter-spacing: 0.01em;
 }
 
+.overview-engine-marks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+}
+.overview-engine-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  text-decoration: none;
+}
+button.overview-card-title:hover .overview-engine-mark {
+  text-decoration: none;
+  color: var(--color-text);
+}
+
 .overview-layout-toggle {
   display: inline-flex;
   align-items: stretch;

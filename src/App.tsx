@@ -35,6 +35,7 @@ function placeholderSnapshot(
     workerLabel?: string | null;
     workerHeadId?: string | null;
     llmMonitoring?: boolean;
+    llmEngine?: SparkSnapshot["llmEngine"];
   }
 ): SparkSnapshot {
   const role =
@@ -65,6 +66,7 @@ function placeholderSnapshot(
         : role === "head"
           ? true
           : roleFields?.llmMonitoring !== false,
+    llmEngine: role === "worker" ? "auto" : roleFields?.llmEngine ?? "auto",
     hardware: {
       device: "NVIDIA DGX Spark",
       cpuModel: "…",
@@ -233,6 +235,7 @@ function DashboardApp() {
               workerLabel: c.workerLabel ?? existing.workerLabel,
               workerHeadId: c.workerHeadId ?? existing.workerHeadId,
               llmMonitoring: c.llmMonitoring ?? existing.llmMonitoring,
+              llmEngine: c.llmEngine ?? existing.llmEngine,
               disabledDevices: c.disabledDevices || existing.disabledDevices,
               disabledInterfaces: c.disabledInterfaces || existing.disabledInterfaces,
               llmPorts: c.llmPorts ?? existing.llmPorts,
@@ -251,6 +254,7 @@ function DashboardApp() {
               workerLabel: c.workerLabel,
               workerHeadId: c.workerHeadId,
               llmMonitoring: c.llmMonitoring,
+              llmEngine: c.llmEngine,
             }
           );
         })

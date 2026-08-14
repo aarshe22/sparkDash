@@ -6,6 +6,15 @@ const r = Object.create(SparkRegistry.prototype);
 const n = (partial) =>
   r._normalizeConfig({ id: "s6", name: "S6", lanIp: "10.0.0.6", ...partial });
 
+test("llmEngine persists for head/standalone and clears on worker", () => {
+  assert.equal(n({ role: "standalone" }).llmEngine, "auto");
+  assert.equal(n({ role: "standalone", llmEngine: "sglang" }).llmEngine, "sglang");
+  assert.equal(n({ role: "head", llmEngine: "vllm" }).llmEngine, "vllm");
+  assert.equal(n({ role: "standalone", llmEngine: "ollama" }).llmEngine, "ollama");
+  assert.equal(n({ role: "standalone", llmEngine: "SG-Lang" }).llmEngine, "sglang");
+  assert.equal(n({ role: "worker", llmEngine: "sglang" }).llmEngine, "auto");
+});
+
 test("roles derive workerNode and llmMonitoring", () => {
   assert.equal(n({ role: "head" }).workerNode, false);
   assert.equal(n({ role: "head" }).llmMonitoring, true);

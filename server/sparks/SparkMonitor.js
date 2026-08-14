@@ -81,6 +81,9 @@ export class SparkMonitor {
       const existing = prevProbes.get(port);
       if (existing) {
         existing.spark = spark;
+        if (typeof existing.syncPreferredEngine === "function") {
+          existing.syncPreferredEngine();
+        }
         this.llmProbes.set(port, existing);
       } else {
         this.llmProbes.set(port, new LlmProbe(spark, port));
@@ -180,6 +183,7 @@ export class SparkMonitor {
       workerLabel: this.spark.workerLabel || null,
       workerHeadId: this.spark.workerHeadId || null,
       llmMonitoring: this._llmMonitoringEnabled(),
+      llmEngine: this.spark.llmEngine || "auto",
       llmPort: ports[0] ?? LLM_PORT,
       llmPorts: ports,
       hardware: this._getHardwareSummary(),

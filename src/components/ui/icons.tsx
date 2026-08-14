@@ -73,6 +73,63 @@ export function BotIcon({ className }: IconProps) {
   );
 }
 
+/** vLLM serving engine. */
+export function VllmIcon({ className }: IconProps) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M4 5h5l3 14 3-14h5" />
+      <path d="M8 11h8" />
+    </svg>
+  );
+}
+
+/** SGLang serving engine. */
+export function SglangIcon({ className }: IconProps) {
+  return (
+    <svg {...baseProps(className)}>
+      <circle cx="12" cy="5" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <circle cx="18" cy="19" r="2.2" />
+      <path d="M12 7.2v4.3M12 11.5L7.4 17.2M12 11.5l4.6 5.7" />
+    </svg>
+  );
+}
+
+/** Ollama local model server. */
+export function OllamaIcon({ className }: IconProps) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M5 16c0-4.5 3-8 7-8s7 3.5 7 8" />
+      <path d="M8 9.5L6 5.5M16 9.5l2-4" />
+      <circle cx="9.5" cy="14.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14.5" cy="14.5" r="1" fill="currentColor" stroke="none" />
+      <path d="M10 18h4" />
+    </svg>
+  );
+}
+
+/** llama.cpp native server. */
+export function LlamaCppIcon({ className }: IconProps) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M8 4l-5 8 5 8" />
+      <path d="M16 4l5 8-5 8" />
+      <path d="M10.5 19h3" />
+    </svg>
+  );
+}
+
+/** ComfyUI / image-workflow service. */
+export function ComfyIcon({ className }: IconProps) {
+  return (
+    <svg {...baseProps(className)}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="9" cy="11" r="2" />
+      <path d="M3 16l5-4 3 2 4-5 6 7" />
+    </svg>
+  );
+}
+
 /** Download arrow into a tray — used by the OpenCode config link. */
 export function DownloadIcon({ className }: IconProps) {
   return (

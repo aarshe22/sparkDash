@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { LlmMetrics, SlotTelemetry, RecipeMetadata, RecipeInfo } from "../../api/types";
-import { listLlmModels, updateLlmPort, type LlmListedModel } from "../../api/client";
+import { listLlmModels, updateLlmPort, updateSpark, type LlmListedModel } from "../../api/client";
 import { formatContextLength } from "../../lib/llmEndpoints";
+import { monitoringEngineDraft, type LlmEngine } from "../../lib/llmEngine";
 import { withDashboardPath } from "../../lib/dashboardPath";
 import { Panel } from "../ui/Panel";
 import { TelemetryChart, type ChartSeries } from "../ui/TelemetryChart";
@@ -13,6 +14,7 @@ interface LlmPanelProps {
   llm: LlmMetrics | null;
   sparkId: string;
   llmPort: number;
+  llmEngine?: LlmEngine | string | null;
   haproxyPublicPort?: number | null;
   onHaproxyPortChange?: (targetLlmPort: number, publicPort: number) => Promise<void>;
 /** Legacy single-port change callback. Optional now that SparkPage manages multi-port. */
@@ -41,6 +43,17 @@ const VLLM_METRIC_INFO = {
     "95th percentile inter-token latency (time between successive output tokens) from vLLM history. Spikes mean decode stalls or contention.",
   mtpAccept:
     "Lifetime speculative / MTP acceptance rate (accepted draft tokens / drafted tokens). Higher means speculative decoding is paying off.",
+} as const;
+
+const SGLANG_METRIC_INFO = {
+  kvCache:
+    "Fraction of SGLang token usage (num_used_tokens / max tokens, 0-100%). High values mean little room for new or long contexts.",
+  requests:
+    "Run = requests actively generating (num_running_reqs). Wait = queued (num_queue_reqs).",
+  cacheHit:
+    "Prefix / radix-cache hit rate from SGLang. Higher means more prompt reuse and less prefill work.",
+  specAccept:
+    "Speculative decode acceptance rate (accepted draft tokens / drafted tokens). Higher means EAGLE / spec decoding is paying off.",
 } as const;
 
 const DS4_METRIC_INFO = {
@@ -80,7 +93,8 @@ function BackendBadge({ backend }: { backend: string | null }) {
   const labels: Record<string, string> = {
     vllm: "vLLM",
     "llama.cpp": "llama.cpp",
-    sglang: "sgLang",
+    sglang: "SGLang",
+    ollama: "Ollama",
     ds4: "DS4",
   };
   return (
@@ -485,10 +499,13 @@ function fmtBytes(v: number | undefined | null): string {
   return `${v} B`;
 }
 
-export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHaproxyPortChange, onLlmPortChange, onRemovePort, llmPortsCount, className }: LlmPanelProps) {
+export function LlmPanel({ llm, sparkId, llmPort, llmEngine, haproxyPublicPort = null, onHaproxyPortChange, onLlmPortChange, onRemovePort, llmPortsCount, className }: LlmPanelProps) {
   const [history, setHistory] = useState<History>({ genTps: [], prefillTps: [], ttft: [], e2e: [] });
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
+  const [engineDraft, setEngineDraft] = useState<LlmEngine>(
+    monitoringEngineDraft(llmEngine)
+  );
   const [haproxyPortDraft, setHaproxyPortDraft] = useState(
     haproxyPublicPort == null ? "" : String(haproxyPublicPort)
   );
@@ -517,8 +534,9 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
     if (!showSettings) {
       setPortDraft(String(llmPort));
       setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort));
+      setEngineDraft(monitoringEngineDraft(llmEngine));
     }
-  }, [llmPort, haproxyPublicPort, showSettings]);
+  }, [llmPort, haproxyPublicPort, llmEngine, showSettings]);
 
   useEffect(() => {
     if (!llm || !available) return;
@@ -553,7 +571,9 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
   })();
   const haproxyPortInvalid = haproxyPortDraft.trim() !== "" && parsedHaproxyPort === null;
   const haproxyPortDirty = parsedHaproxyPort !== haproxyPublicPort;
-  const settingsDirty = portDirty || haproxyPortDirty;
+  const savedEngine: LlmEngine = monitoringEngineDraft(llmEngine);
+  const engineDirty = engineDraft !== savedEngine;
+  const settingsDirty = portDirty || haproxyPortDirty || engineDirty;
 
   const handleSavePort = async () => {
     if (parsedPort === null) { setSaveError("Port must be an integer 1-65535"); return; }
@@ -571,6 +591,9 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
       if (portDirty) {
         await updateLlmPort(sparkId, parsedPort);
         onLlmPortChange?.(parsedPort);
+      }
+      if (engineDirty) {
+        await updateSpark(sparkId, { llmEngine: engineDraft, llmMonitoring: true });
       }
       setShowSettings(false);
     } catch (err) {
@@ -637,7 +660,7 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
               <span aria-hidden>\u00D7</span><span>Remove</span>
             </button>
           )}
-          <button type="button" title={showSettings ? "Done" : "LLM settings"} onClick={() => { if (showSettings) { setPortDraft(String(llmPort)); setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort)); setSaveError(null); resetModelList(); } setShowSettings(!showSettings); }} disabled={saving} className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover disabled:opacity-50 ${showSettings ? "bg-surface-elevated text-text" : ""}`}>
+          <button type="button" title={showSettings ? "Done" : "LLM settings"} onClick={() => { if (showSettings) { setPortDraft(String(llmPort)); setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort)); setEngineDraft(monitoringEngineDraft(llmEngine)); setSaveError(null); resetModelList(); } setShowSettings(!showSettings); }} disabled={saving} className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover disabled:opacity-50 ${showSettings ? "bg-surface-elevated text-text" : ""}`}>
             <GearIcon /><span>{showSettings ? "Done" : "Settings"}</span>
           </button>
           {llmPortsCount != null && llmPortsCount > 1 && onRemovePort && (
@@ -680,6 +703,39 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
               Public HTTPS listener for this specific LLM endpoint.
             </span>
           </label>
+          <fieldset className="space-y-1.5">
+            <legend className="text-xs text-muted">Engine monitoring</legend>
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="radio"
+                name={`llm-engine-${sparkId}-${llmPort}`}
+                checked={engineDraft === "vllm"}
+                onChange={() => { setEngineDraft("vllm"); setSaveError(null); }}
+                className="accent-[var(--color-accent)]"
+              />
+              <span>vLLM monitoring</span>
+            </label>
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="radio"
+                name={`llm-engine-${sparkId}-${llmPort}`}
+                checked={engineDraft === "sglang"}
+                onChange={() => { setEngineDraft("sglang"); setSaveError(null); }}
+                className="accent-[var(--color-accent)]"
+              />
+              <span>SGLang monitoring</span>
+            </label>
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="radio"
+                name={`llm-engine-${sparkId}-${llmPort}`}
+                checked={engineDraft === "ollama"}
+                onChange={() => { setEngineDraft("ollama"); setSaveError(null); }}
+                className="accent-[var(--color-accent)]"
+              />
+              <span>Ollama monitoring</span>
+            </label>
+          </fieldset>
           {(listedModels != null || modelsError) && (
             <div className="space-y-1.5 rounded-md border border-border bg-surface-elevated px-3 py-2">
               <p className="text-[10px] text-muted">
@@ -711,7 +767,7 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
           {haproxyPortInvalid && <p className="text-[10px] text-danger">Enter an HAProxy port between 1 and 65535</p>}
           {saveError && <p className="text-[10px] text-danger">{saveError}</p>}
           <div className="flex items-center justify-end gap-2">
-            <button type="button" onClick={() => { setPortDraft(String(llmPort)); setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort)); setSaveError(null); resetModelList(); setShowSettings(false); }} disabled={saving} className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">Cancel</button>
+            <button type="button" onClick={() => { setPortDraft(String(llmPort)); setHaproxyPortDraft(haproxyPublicPort == null ? "" : String(haproxyPublicPort)); setEngineDraft(monitoringEngineDraft(llmEngine)); setSaveError(null); resetModelList(); setShowSettings(false); }} disabled={saving} className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">Cancel</button>
             <button type="button" onClick={() => void handleSavePort()} disabled={saving || portInvalid || haproxyPortInvalid || !settingsDirty} className="rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50">{saving ? "Saving\u2026" : "Save"}</button>
           </div>
         </div>
@@ -918,6 +974,15 @@ export function LlmPanel({ llm, sparkId, llmPort, haproxyPublicPort = null, onHa
               <div className="space-y-0.5"><MetricInfoTip id="e2eP95" label="E2E p95" text={VLLM_METRIC_INFO.e2eP95} openId={metricInfoId} setOpenId={setMetricInfoId} align="right" /><div className="font-tabular text-sm text-text">{llm.e2eP95Seconds != null ? `${llm.e2eP95Seconds.toFixed(3)}s` : "\u2014"}</div></div>
               <div className="space-y-0.5"><MetricInfoTip id="itlP95" label="ITL p95" text={VLLM_METRIC_INFO.itlP95} openId={metricInfoId} setOpenId={setMetricInfoId} /><div className="font-tabular text-sm text-text">{llm.itlP95Seconds != null ? `${llm.itlP95Seconds.toFixed(3)}s` : "\u2014"}</div></div>
               <div className="space-y-0.5"><MetricInfoTip id="mtpAccept" label="MTP Accept" text={VLLM_METRIC_INFO.mtpAccept} openId={metricInfoId} setOpenId={setMetricInfoId} align="right" /><div className="font-tabular text-sm text-text">{llm.mtpAcceptanceRate != null ? `${(llm.mtpAcceptanceRate * 100).toFixed(1)}%` : "\u2014"}</div></div>
+            </div>
+          )}
+
+          {llm?.backend === "sglang" && (
+            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
+              <div className="space-y-0.5"><MetricInfoTip id="sgKv" label="Token usage" text={SGLANG_METRIC_INFO.kvCache} openId={metricInfoId} setOpenId={setMetricInfoId} /><div className={`font-tabular text-sm ${llm.kvCacheUsage == null ? "text-text" : llm.kvCacheUsage >= 0.8 ? "text-danger" : llm.kvCacheUsage >= 0.5 ? "text-warning" : "text-success"}`}>{llm.kvCacheUsage != null ? `${(llm.kvCacheUsage * 100).toFixed(1)}%` : "\u2014"}</div></div>
+              <div className="space-y-0.5"><MetricInfoTip id="sgReq" label="Requests" text={SGLANG_METRIC_INFO.requests} openId={metricInfoId} setOpenId={setMetricInfoId} align="right" /><div className="font-tabular text-sm text-text">{llm.requestsRunning != null || llm.requestsWaiting != null ? `${Math.round(llm.requestsRunning ?? 0)} run / ${Math.round(llm.requestsWaiting ?? 0)} wait` : "\u2014"}</div></div>
+              <div className="space-y-0.5"><MetricInfoTip id="sgCache" label="Cache hit" text={SGLANG_METRIC_INFO.cacheHit} openId={metricInfoId} setOpenId={setMetricInfoId} /><div className="font-tabular text-sm text-text">{llm.prefixCacheHitRate != null ? `${(llm.prefixCacheHitRate * 100).toFixed(1)}%` : "\u2014"}</div></div>
+              <div className="space-y-0.5"><MetricInfoTip id="sgSpec" label="Spec accept" text={SGLANG_METRIC_INFO.specAccept} openId={metricInfoId} setOpenId={setMetricInfoId} align="right" /><div className="font-tabular text-sm text-text">{llm.mtpAcceptanceRate != null ? `${(llm.mtpAcceptanceRate * 100).toFixed(1)}%` : "\u2014"}</div></div>
             </div>
           )}
 

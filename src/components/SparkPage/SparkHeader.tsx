@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
 import { shutdownSpark, wakeSpark } from "../../api/client";
+import { EngineMarks } from "../EngineMarks";
 import { EditIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
 
 interface SparkHeaderProps {
@@ -98,6 +99,7 @@ export function SparkHeader({ spark, onEdit }: SparkHeaderProps) {
               </span>
             )}
           </div>
+          <EngineMarks spark={spark} />
           <p className="truncate text-xs text-muted">
             {hardware.device} · {hardware.gpuChip}
           </p>

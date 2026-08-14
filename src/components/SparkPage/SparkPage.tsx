@@ -137,6 +137,7 @@ export function SparkPage({
                   llm={llmMetrics}
                   sparkId={spark.id}
                   llmPort={port}
+                  llmEngine={spark.llmEngine}
                   haproxyPublicPort={haproxyPublicPort(haproxySettings, spark, port)}
                   onHaproxyPortChange={
                     onHaproxyPortChange

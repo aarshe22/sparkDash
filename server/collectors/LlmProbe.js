@@ -10,11 +10,13 @@
  */
 import { LLM_PROBE_TIMEOUT_MS } from "../config.js";
 import { VllmMetricsParser } from "./VllmMetricsParser.js";
+import { normalizeLlmEngine } from "../llmEngine.js";
 import { execSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 
 const FAIL_RESET_THRESHOLD = 3;
 const REDETECT_INTERVAL_MS = 60_000;
+const SGLANG_STICKY_TPS_LIVE_MS = 6_000;
 const HOST_ROOT = process.env.HOST_ROOT_PATH || "/host/root";
 const HOST_PROC = process.env.HOST_PROC_PATH || "/host/proc";
 
@@ -120,6 +122,23 @@ export class LlmProbe {
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
     this._vllmMetricsParser = new VllmMetricsParser();
+    this._engineHint = this._preferredEngine();
+    this._sglangStickyTps = null;
+  }
+
+  _preferredEngine() {
+    return normalizeLlmEngine(this.spark?.llmEngine);
+  }
+
+  /** Re-detect when Edit Spark / card settings change vLLM vs SGLang. */
+  syncPreferredEngine() {
+    const next = this._preferredEngine();
+    if (next !== this._engineHint) {
+      this._engineHint = next;
+      this._resetDetection();
+      this._lastDetectAt = 0;
+      this._consecutiveFailures = 0;
+    }
   }
 
   /** Update probe port (and host from spark). Resets detection when the target changes. */
@@ -140,6 +159,7 @@ export class LlmProbe {
   /** Probe the LLM server and return a snapshot. */
   async probe() {
     try {
+      this.syncPreferredEngine();
       const shouldDetect =
         this.serverIsOpenAI === null ||
         Date.now() - this._lastDetectAt > REDETECT_INTERVAL_MS;
@@ -265,29 +285,34 @@ export class LlmProbe {
     this._ds4Rolling = [];
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
+    this._sglangStickyTps = null;
   }
 
   // ─── Server type detection ───────────────────────────────
   async _detectServerType() {
-    const slotUrl = `${this.baseUrl}/slots`;
-    try {
-      const slotRes = await this._fetch(slotUrl);
-      if (slotRes.ok) {
-        const slots = await slotRes.json();
-        if (Array.isArray(slots)) {
-          this.serverIsOpenAI = false;
-          this.backendType = "llama.cpp";
-          return;
+    const preferred = this._preferredEngine();
+
+    // llama.cpp /slots — skip when the user forced vLLM or SGLang
+    if (preferred !== "vllm" && preferred !== "sglang") {
+      const slotUrl = `${this.baseUrl}/slots`;
+      try {
+        const slotRes = await this._fetch(slotUrl);
+        if (slotRes.ok) {
+          const slots = await slotRes.json();
+          if (Array.isArray(slots)) {
+            this.serverIsOpenAI = false;
+            this.backendType = "llama.cpp";
+            return;
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     // Try OpenAI-compatible
     try {
       const modelRes = await this._fetch(`${this.baseUrl}/v1/models`);
       if (modelRes.ok) {
         this.serverIsOpenAI = true;
-        // Detect ds4 engine by owned_by field
         try {
           const modelsData = await modelRes.clone().json();
           const model = modelsData?.data?.[0];
@@ -304,6 +329,36 @@ export class LlmProbe {
             };
             return;
           }
+          if (typeof model?.owned_by === "string" && /sglang/i.test(model.owned_by)) {
+            this.backendType = "sglang";
+            return;
+          }
+        } catch {}
+        if (preferred === "sglang") {
+          this.backendType = "sglang";
+          return;
+        }
+        if (preferred === "ollama") {
+          this.backendType = "ollama";
+          return;
+        }
+        if (preferred === "vllm") {
+          this.backendType = "vllm";
+          return;
+        }
+        if (await this._probeIsSglang()) {
+          this.backendType = "sglang";
+          return;
+        }
+        try {
+          const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
+          if (metricsRes.ok) {
+            const txt = await metricsRes.text();
+            if (/(?:^|\n)sglang[:_]/.test(txt) && !/(?:^|\n)vllm:/.test(txt)) {
+              this.backendType = "sglang";
+              return;
+            }
+          }
         } catch {}
         this.backendType = "vllm";
         return;
@@ -312,6 +367,18 @@ export class LlmProbe {
 
     this.serverIsOpenAI = null;
     this.backendType = null;
+  }
+
+  async _probeIsSglang() {
+    for (const path of ["/get_server_info", "/server_info"]) {
+      try {
+        const res = await this._fetch(`${this.baseUrl}${path}`);
+        if (!res.ok) continue;
+        const data = await res.json().catch(() => null);
+        if (data && typeof data === "object" && !Array.isArray(data)) return true;
+      } catch {}
+    }
+    return false;
   }
 
   // ─── DS4 engine path ─────────────────────────────────────
@@ -569,32 +636,44 @@ export class LlmProbe {
       throw new Error("OpenAI-compatible /v1/models unreachable");
     }
 
-    // Skip SGLang probe when we already know the backend is vLLM
-    let isSglang = false;
-    if (this.backendType !== "vllm") {
+    const preferred = this._preferredEngine();
+    const forceSglang = preferred === "sglang" || this.backendType === "sglang";
+    const skipSglang = preferred === "vllm" && this.backendType !== "sglang";
+
+    if (!skipSglang && (forceSglang || this.backendType !== "vllm")) {
       try {
         const sgRes = await this._fetch(`${this.baseUrl}/get_server_info`);
         if (sgRes.ok) {
-          isSglang = true;
+          this.backendType = "sglang";
           const sgData = await sgRes.json();
-          this.contextLength = sgData.max_total_tokens || sgData.context_length || this.contextLength;
-          if (sgData.total_input_tokens != null && sgData.total_output_tokens != null) {
-            const deltaIn = sgData.total_input_tokens - this.lastTokenCounts.input;
-            const deltaOut = sgData.total_output_tokens - this.lastTokenCounts.output;
-            this.lastTokenCounts.input = sgData.total_input_tokens;
-            this.lastTokenCounts.output = sgData.total_output_tokens;
-            this.totalOutputTokens = sgData.total_output_tokens;
-            if (dtSec > 0 && dtSec < 10) {
-              this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-              this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
-            }
-          }
+          this._applySglangServerInfo(sgData, dtSec);
         }
       } catch {}
+      if (this.backendType !== "sglang") {
+        try {
+          const sgRes = await this._fetch(`${this.baseUrl}/server_info`);
+          if (sgRes.ok) {
+            this.backendType = "sglang";
+            const sgData = await sgRes.json();
+            this._applySglangServerInfo(sgData, dtSec);
+          }
+        } catch {}
+      }
+    }
+
+    if (this.backendType === "sglang" || forceSglang) {
+      this.backendType = "sglang";
+      try {
+        const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
+        if (metricsRes.ok) {
+          this._applySglangMetrics(await metricsRes.text(), dtSec);
+        }
+      } catch {}
+      this._collectRecipeInfo();
+      return this._getSnapshot();
     }
 
     // Single /metrics fetch: tok/s + slots/sleep (vLLM exposes max_model_len via /v1/models)
-    if (!isSglang) {
       try {
         const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
         if (metricsRes.ok) {
@@ -670,10 +749,9 @@ export class LlmProbe {
               : null;
         }
       } catch {}
-    }
 
-    this.backendType = isSglang ? "sglang" : "vllm";
-    if (this.backendType === "vllm") this._collectRecipeInfo();
+    this.backendType = "vllm";
+    this._collectRecipeInfo();
 
     return this._getSnapshot();
   }
@@ -736,6 +814,146 @@ export class LlmProbe {
 
     this.backendType = "llama.cpp";
     return this._getSnapshot();
+  }
+
+  // ─── SGLang helpers ─────────────────────────────────────
+  static _positiveNumber(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  static _sglangLastGenThroughput(sgData) {
+    if (!sgData || typeof sgData !== "object") return null;
+    const top = Number(sgData.last_gen_throughput);
+    if (Number.isFinite(top) && top >= 0) return top;
+    const states = sgData.internal_states;
+    if (!Array.isArray(states) || !states.length) return null;
+    let best = null;
+    for (const st of states) {
+      if (!st || typeof st !== "object") continue;
+      const v = Number(st.last_gen_throughput);
+      if (!Number.isFinite(v) || v < 0) continue;
+      if (best == null || v > best) best = v;
+    }
+    return best;
+  }
+
+  _sglangStickyThroughput(raw) {
+    if (raw == null || !Number.isFinite(raw) || raw < 0) {
+      this._sglangStickyTps = null;
+      return 0;
+    }
+    const rounded = Math.round(raw * 100) / 100;
+    const now = Date.now();
+    const prev = this._sglangStickyTps;
+    if (!prev) {
+      this._sglangStickyTps = { value: rounded, liveUntil: 0 };
+      return 0;
+    }
+    if (rounded !== prev.value) {
+      this._sglangStickyTps = { value: rounded, liveUntil: now + SGLANG_STICKY_TPS_LIVE_MS };
+      return rounded;
+    }
+    if (prev.liveUntil > now) return rounded;
+    return 0;
+  }
+
+  _applySglangServerInfo(sgData, dtSec) {
+    const explicitCtx =
+      LlmProbe._positiveNumber(sgData.context_length) ??
+      LlmProbe._positiveNumber(sgData.max_total_tokens);
+    if (explicitCtx != null) this.contextLength = explicitCtx;
+
+    const maxRunning = Number(sgData.max_running_requests);
+    if (Number.isFinite(maxRunning) && maxRunning > 0) {
+      this.slotsTotal = Math.round(maxRunning);
+    }
+
+    const inTok = sgData.total_input_tokens;
+    const outTok = sgData.total_output_tokens;
+    if (inTok != null && outTok != null) {
+      const input = Number(inTok);
+      const output = Number(outTok);
+      if (Number.isFinite(input) && Number.isFinite(output)) {
+        const deltaIn = input - this.lastTokenCounts.input;
+        const deltaOut = output - this.lastTokenCounts.output;
+        this.lastTokenCounts.input = input;
+        this.lastTokenCounts.output = output;
+        this.totalOutputTokens = output;
+        if (dtSec > 0 && dtSec < 10) {
+          this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+          this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        }
+        return;
+      }
+    }
+    this.generationTps = this._sglangStickyThroughput(LlmProbe._sglangLastGenThroughput(sgData));
+  }
+
+  _sglangMetric(txt, name) {
+    return this._getPromMetric(txt, `sglang:${name}`) ?? this._getPromMetric(txt, `sglang_${name}`);
+  }
+
+  _applySglangMetrics(txt, dtSec) {
+    const gen = this._sglangMetric(txt, "generation_tokens_total");
+    const prompt = this._sglangMetric(txt, "prompt_tokens_total");
+    if (gen != null) {
+      if (dtSec > 0 && dtSec < 10) {
+        const deltaOut = gen - this.lastTokenCounts.output;
+        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        if (prompt != null) {
+          const deltaIn = prompt - this.lastTokenCounts.input;
+          this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+          this.lastTokenCounts.input = prompt;
+        }
+      }
+      this.lastTokenCounts.output = gen;
+      this.totalOutputTokens = gen;
+    } else {
+      const gauge = this._sglangMetric(txt, "gen_throughput");
+      if (gauge != null) {
+        this.generationTps = Math.max(0, Math.round(gauge * 100) / 100);
+      }
+    }
+
+    const running = this._sglangMetric(txt, "num_running_reqs");
+    if (running != null) {
+      this.requestsRunning = running;
+      this.slotsActive = Math.round(running);
+    }
+    const waiting = this._sglangMetric(txt, "num_queue_reqs");
+    if (waiting != null) this.requestsWaiting = waiting;
+
+    const tokenUsage = this._sglangMetric(txt, "token_usage");
+    if (tokenUsage != null) this.kvCacheUsage = tokenUsage;
+
+    const cacheHit = this._sglangMetric(txt, "cache_hit_rate");
+    if (cacheHit != null) this.prefixCacheHitRate = Math.round(cacheHit * 10000) / 10000;
+
+    const specRate = this._sglangMetric(txt, "spec_accept_rate");
+    const specLen = this._sglangMetric(txt, "spec_accept_length");
+    if (specRate != null) this.mtpAcceptanceRate = Math.round(specRate * 10000) / 10000;
+    else if (specLen != null) this.mtpAcceptanceRate = Math.round(specLen * 10000) / 10000;
+
+    const ttftHist = this._parseVllmHistogram(txt, "sglang:time_to_first_token_seconds");
+    const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
+    if (ttftP95 != null) this.ttftP95Seconds = Math.round(ttftP95 * 1000) / 1000;
+  }
+
+  _getPromMetric(body, name) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
+    let sum = 0;
+    let found = false;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const v = parseFloat(m[1]);
+      if (Number.isFinite(v)) {
+        sum += v;
+        found = true;
+      }
+    }
+    return found ? sum : null;
   }
 
   // ─── DS4 metrics helpers ──────────────────────────────────
@@ -861,6 +1079,8 @@ export class LlmProbe {
         this.recipeInfo = this._collectDs4RecipeInfo();
       } else if (this.backendType === "vllm") {
         this.recipeInfo = this._collectVllmRecipeInfo();
+      } else if (this.backendType === "sglang") {
+        this.recipeInfo = this._collectSglangRecipeInfo();
       } else {
         this.recipeInfo = null;
       }
@@ -892,7 +1112,7 @@ export class LlmProbe {
             const allArgs = parts.join(" ");
             if (allArgs.includes(`--port ${this.port}`) || allArgs.includes(`port=${this.port}`)) return parseInt(pid);
           }
-          if (exe.includes("vllm") || exe.includes("python")) {
+          if (exe.includes("sglang") || exe.includes("vllm") || exe.includes("python")) {
             const allArgs = parts.join(" ");
             if (allArgs.includes(`--port ${this.port}`) || allArgs.includes(`port=${this.port}`)) return parseInt(pid);
           }
@@ -1136,6 +1356,32 @@ export class LlmProbe {
       prefixCaching,
       acceptRatio,
       uptime: null,
+    };
+  }
+
+  _collectSglangRecipeInfo() {
+    const vllm = this._collectVllmRecipeInfo();
+    const base = vllm || {
+      engineType: "SGLang",
+      modelName: this.modelId || null,
+      containerImage: null,
+      author: null,
+      authorName: null,
+      contextLength: this.contextLength,
+      maxLanes: this.slotsTotal || null,
+      specDecodeMethod: null,
+      quantization: null,
+      gmu: null,
+      kvCacheDtype: null,
+      prefixCaching: null,
+      acceptRatio: this.mtpAcceptanceRate ?? null,
+      uptime: null,
+    };
+    return {
+      ...base,
+      engineType: "SGLang",
+      acceptRatio: this.mtpAcceptanceRate ?? base.acceptRatio ?? null,
+      contextLength: this.contextLength ?? base.contextLength,
     };
   }
 

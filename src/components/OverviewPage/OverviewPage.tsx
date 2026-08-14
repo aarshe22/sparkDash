@@ -19,6 +19,7 @@ import {
   wakeAllSparks,
 } from "../../api/client";
 import { MetricBar } from "../ui/MetricBar";
+import { EngineMarks } from "../EngineMarks";
 import { ActivityIcon, GridIcon, PowerOffIcon, PowerOnIcon, RowsIcon } from "../ui/icons";
 import { formatContextLength, sparkLlmEndpoints } from "../../lib/llmEndpoints";
 import {
@@ -444,35 +445,34 @@ function splitHostModel(name: string): { host: string; model: string | null } {
 }
 
 function CardTitle({
-  name,
-  sparkId,
+  spark,
   onSelect,
 }: {
-  name: string;
-  sparkId: string;
+  spark: SparkSnapshot;
   onSelect?: (id: string) => void;
 }) {
-  const { host, model } = splitHostModel(name);
+  const { host, model } = splitHostModel(spark.name);
   const inner = (
     <>
       <span className="overview-card-host">{host}</span>
       {model ? <span className="overview-card-model">{model}</span> : null}
+      <EngineMarks spark={spark} />
     </>
   );
   if (onSelect) {
     return (
       <button
         type="button"
-        onClick={() => onSelect(sparkId)}
+        onClick={() => onSelect(spark.id)}
         className="overview-card-title"
-        title={name}
+        title={spark.name}
       >
         {inner}
       </button>
     );
   }
   return (
-    <div className="overview-card-title" title={name}>
+    <div className="overview-card-title" title={spark.name}>
       {inner}
     </div>
   );
@@ -568,7 +568,7 @@ function SparkCard({
           className={`mt-[6px] h-2 w-2 shrink-0 rounded-full ${online ? "bg-success dot-glow-success" : "bg-danger"}`}
         />
         <div className="min-w-0 flex-1">
-          <CardTitle name={spark.name} sparkId={spark.id} onSelect={onSelect} />
+          <CardTitle spark={spark} onSelect={onSelect} />
         </div>
         <span className="mt-[5px] text-[10px] uppercase tracking-wide text-muted">
           {online ? "online" : "offline"}
@@ -669,7 +669,17 @@ function SparkCard({
               if (!llm) return null;
               return (
                 <MiniStat
-                  label={llm.backend === "vllm" ? "vLLM" : llm.backend ?? "LLM"}
+                  label={
+                    llm.backend === "vllm"
+                      ? "vLLM"
+                      : llm.backend === "sglang"
+                        ? "SGLang"
+                        : llm.backend === "ollama"
+                          ? "Ollama"
+                          : llm.backend === "llama.cpp"
+                            ? "llama.cpp"
+                            : llm.backend ?? "LLM"
+                  }
                   value={llm.modelId ?? "unknown"}
                   tone="accent"
                   title={llm.modelId ?? undefined}

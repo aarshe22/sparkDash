@@ -11,6 +11,7 @@ import {
 import type { SparkConfig, SparkRole } from "../api/types";
 import { resolveSparkRole } from "../api/sparkRole";
 import { useModalPresence } from "../hooks/useModalPresence";
+import { EngineMonitoringCheckboxes } from "./EngineMonitoringCheckboxes";
 import { InfoIcon } from "./ui/icons";
 
 interface EditSparkDialogProps {
@@ -114,7 +115,8 @@ export function EditSparkDialog({
       role: next,
       workerNode: next === "worker",
       // Leaving Worker: turn monitoring back on (worker forces it false in state).
-      llmMonitoring: next === "worker" ? false : next === "head" ? true : true,
+      llmMonitoring: next === "worker" ? false : true,
+      llmEngine: next === "worker" ? "auto" : config?.llmEngine ?? "auto",
     });
   };
 
@@ -236,6 +238,7 @@ export function EditSparkDialog({
         workerHeadId: role === "worker" ? (config.workerHeadId?.trim() || null) : null,
         llmMonitoring:
           role === "worker" ? false : role === "head" ? true : config.llmMonitoring !== false,
+        llmEngine: role === "worker" ? "auto" : config.llmEngine ?? "auto",
         ssh: {
           host: config.ssh.host || config.lanIp,
           user: config.ssh.user,
@@ -357,8 +360,8 @@ export function EditSparkDialog({
                   <span>Role</span>
                   <span
                     className="inline-flex shrink-0 cursor-help text-muted hover:text-text"
-                    title="Head always monitors the local LLM. Standalone can opt in/out. Workers have no local API — the LLM card is hidden and ports are not probed."
-                    aria-label="Head always monitors the local LLM. Standalone can opt in or out. Workers hide the LLM card and do not probe ports."
+                    title="Head always monitors the local LLM. Standalone can opt in/out of vLLM or SGLang monitoring. Workers have no local API — the LLM card is hidden and ports are not probed."
+                    aria-label="Head always monitors the local LLM. Standalone can opt in or out of vLLM or SGLang monitoring. Workers hide the LLM card and do not probe ports."
                   >
                     <InfoIcon className="h-3.5 w-3.5" />
                   </span>
@@ -374,23 +377,8 @@ export function EditSparkDialog({
                 </select>
               </div>
 
-              {role === "standalone" && (
-                <label className="flex items-center gap-2 text-xs text-muted">
-                  <input
-                    type="checkbox"
-                    checked={config.llmMonitoring !== false}
-                    onChange={(e) => update({ llmMonitoring: e.target.checked })}
-                    className="rounded border-border"
-                  />
-                  <span>LLM monitoring</span>
-                  <span
-                    className="inline-flex shrink-0 cursor-help text-muted hover:text-text"
-                    title="When enabled, probe the local LLM API and show the LLM card on this Spark."
-                    aria-label="Enable probing the local LLM API and showing the LLM card."
-                  >
-                    <InfoIcon className="h-3.5 w-3.5" />
-                  </span>
-                </label>
+              {role !== "worker" && (
+                <EngineMonitoringCheckboxes role={role} config={config} update={update} />
               )}
 
               {role === "worker" && (
