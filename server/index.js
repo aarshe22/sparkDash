@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
 import { sshExec, sshTest, llmTest } from "./collectors/ssh.js";
+import { listLlmModels } from "./collectors/llmModels.js";
 import { validateSparkTarget, createRateLimiter } from "./validate.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
 import { broadcastForLanIp, effectiveMac, normalizeMac, sendWol } from "./wol.js";
@@ -394,6 +395,20 @@ app.put("/api/sparks/:id/disabled-interfaces", (req, res) => {
       startMonitor(updated);
     }
     res.json({ success: true, disabledInterfaces: cleaned });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// List every model advertised by GET /v1/models on a Spark LLM port.
+app.get("/api/sparks/:id/llm/models", async (req, res) => {
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+    const portRaw = req.query.port;
+    const port = portRaw != null && String(portRaw).trim() !== "" ? Number(portRaw) : undefined;
+    const result = await listLlmModels(spark, port);
+    res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

@@ -711,6 +711,40 @@ input[type="checkbox"] {
   transform: translateY(-1px);
 }
 
+.overview-card-title {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+button.overview-card-title:hover .overview-card-host,
+button.overview-card-title:hover .overview-card-model {
+  text-decoration: underline;
+}
+.overview-card-host,
+.overview-card-model {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--color-text-strong);
+  overflow-wrap: anywhere;
+}
+.overview-card-model {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 .overview-layout-toggle {
   display: inline-flex;
   align-items: stretch;
@@ -754,8 +788,9 @@ input[type="checkbox"] {
   gap: 12px 20px;
 }
 .overview-card--row .overview-card-head {
-  flex: 0 1 220px;
-  min-width: 160px;
+  flex: 0 1 240px;
+  min-width: 180px;
+  align-items: flex-start;
 }
 .overview-card--row .overview-card-bars {
   flex: 1 1 320px;
@@ -783,6 +818,29 @@ input[type="checkbox"] {
 }
 .overview-card--row .overview-card-tps .overview-card-tps-value {
   font-size: 22px;
+}
+
+/* Stacked (tiled) card stats: 2-col grid, values wrap instead of ellipsis */
+.overview-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 1rem;
+  row-gap: 0.625rem;
+  margin-top: 1rem;
+  padding-top: 0.875rem;
+  border-top: 1px solid var(--color-border);
+}
+.overview-mini-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+.overview-mini-stat-value {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.25;
 }
 
 /* ─── Pulse / glow accents ─────────────────────────────── */

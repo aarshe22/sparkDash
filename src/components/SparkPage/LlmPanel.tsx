@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { LlmMetrics, SlotTelemetry, RecipeMetadata, RecipeInfo } from "../../api/types";
-import { updateLlmPort } from "../../api/client";
+import { listLlmModels, updateLlmPort, type LlmListedModel } from "../../api/client";
+import { formatContextLength } from "../../lib/llmEndpoints";
 import { Panel } from "../ui/Panel";
 import { TelemetryChart, type ChartSeries } from "../ui/TelemetryChart";
-import { BotIcon, GearIcon, InfoIcon } from "../ui/icons";
+import { BotIcon, GearIcon, InfoIcon, RotateIcon } from "../ui/icons";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 
@@ -412,7 +413,7 @@ function RecipeSection({
           <div className="recipe-merged-subsection-title">Configuration</div>
           <div className="recipe-info-badges">
             {(info?.contextLength ?? metadata?.contextLength) != null && (
-              <RecipeBadge label="Context" value={(info?.contextLength ?? metadata?.contextLength)! >= 1024 ? `${Math.round((info?.contextLength ?? metadata?.contextLength)! / 1024)}K` : String((info?.contextLength ?? metadata?.contextLength)!)} />
+              <RecipeBadge label="Context" value={formatContextLength(info?.contextLength ?? metadata?.contextLength)} />
             )}
             {info?.maxLanes != null && (
               <RecipeBadge label="Lanes" value={String(info.maxLanes)} accent="accent" />
@@ -487,6 +488,10 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [listedModels, setListedModels] = useState<LlmListedModel[] | null>(null);
+  const [listedPort, setListedPort] = useState<number | null>(null);
   const [engineInfoOpen, setEngineInfoOpen] = useState(false);
   const [benchOpen, setBenchOpen] = useState(false);
   const [metricInfoId, setMetricInfoId] = useState<string | null>(null);
@@ -546,6 +551,35 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
     } finally { setSaving(false); }
   };
 
+  const resetModelList = () => {
+    setListedModels(null);
+    setListedPort(null);
+    setModelsError(null);
+  };
+
+  const handleRefreshModels = async () => {
+    if (parsedPort === null) {
+      setModelsError("Port must be an integer 1–65535");
+      return;
+    }
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const result = await listLlmModels(sparkId, parsedPort);
+      setListedPort(result.port);
+      setListedModels(result.models);
+      if (!result.ok) {
+        setModelsError(result.error || `No response from :${parsedPort}`);
+      }
+    } catch (err) {
+      setListedModels([]);
+      setListedPort(parsedPort);
+      setModelsError(err instanceof Error ? err.message : "Failed to query models");
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
   const genSeries: ChartSeries = { label: "gen tok/s", color: "var(--color-success)", data: history.genTps, area: true, yAxis: "left" };
   const preSeries: ChartSeries = { label: "prefill tok/s", color: "var(--color-accent)", data: history.prefillTps, area: false, yAxis: "right" };
   const ttftSeries: ChartSeries = { label: "TTFT", color: "var(--color-warning)", data: history.ttft, area: false };
@@ -576,7 +610,7 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
               <span aria-hidden>\u00D7</span><span>Remove</span>
             </button>
           )}
-          <button type="button" title={showSettings ? "Done" : "LLM settings"} onClick={() => { if (showSettings) { setPortDraft(String(llmPort)); setSaveError(null); } setShowSettings(!showSettings); }} disabled={saving} className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover disabled:opacity-50 ${showSettings ? "bg-surface-elevated text-text" : ""}`}>
+          <button type="button" title={showSettings ? "Done" : "LLM settings"} onClick={() => { if (showSettings) { setPortDraft(String(llmPort)); setSaveError(null); resetModelList(); } setShowSettings(!showSettings); }} disabled={saving} className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover disabled:opacity-50 ${showSettings ? "bg-surface-elevated text-text" : ""}`}>
             <GearIcon /><span>{showSettings ? "Done" : "Settings"}</span>
           </button>
           {llmPortsCount != null && llmPortsCount > 1 && onRemovePort && (
@@ -590,14 +624,47 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
       {showSettings ? (
         <div className="space-y-3">
           <p className="text-[10px] text-muted">HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4).</p>
-          <label className="block space-y-1">
+          <div className="space-y-1">
             <span className="text-xs text-muted">Port</span>
-            <input type="number" min={1} max={65535} inputMode="numeric" value={portDraft} onChange={(e) => { setPortDraft(e.target.value); setSaveError(null); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleSavePort(); } }} className="w-full rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-tabular text-sm text-text outline-none focus:border-accent" />
-          </label>
+            <div className="flex items-center gap-2">
+              <input type="number" min={1} max={65535} inputMode="numeric" value={portDraft} onChange={(e) => { setPortDraft(e.target.value); setSaveError(null); setModelsError(null); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleSavePort(); } }} className="min-w-0 flex-1 rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-tabular text-sm text-text outline-none focus:border-accent" />
+              <button type="button" title={`Query /v1/models on :${parsedPort ?? llmPort}`} onClick={() => void handleRefreshModels()} disabled={modelsLoading || portInvalid} className="flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1.5 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">
+                <RotateIcon className={`h-3 w-3 ${modelsLoading ? "animate-spin" : ""}`} />
+                <span>{modelsLoading ? "Querying…" : "Refresh"}</span>
+              </button>
+            </div>
+          </div>
+          {(listedModels != null || modelsError) && (
+            <div className="space-y-1.5 rounded-md border border-border bg-surface-elevated px-3 py-2">
+              <p className="text-[10px] text-muted">
+                {modelsLoading
+                  ? `Querying :${parsedPort ?? llmPort}…`
+                  : listedPort != null
+                    ? `${listedModels?.length ?? 0} model${(listedModels?.length ?? 0) === 1 ? "" : "s"} on :${listedPort}`
+                    : "Models"}
+              </p>
+              {modelsError && <p className="text-[10px] text-danger">{modelsError}</p>}
+              {listedModels && listedModels.length > 0 && (
+                <ul className="max-h-40 space-y-1 overflow-y-auto">
+                  {listedModels.map((model) => (
+                    <li key={model.id} className="flex items-baseline justify-between gap-2">
+                      <span className="min-w-0 truncate font-mono text-[11px] text-text" title={model.id}>{model.id}</span>
+                      {model.contextLength ? (
+                        <span className="shrink-0 font-tabular text-[10px] text-muted">{formatContextLength(model.contextLength)}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {listedModels && listedModels.length === 0 && !modelsError && !modelsLoading && (
+                <p className="text-[10px] text-muted">No models advertised on this port.</p>
+              )}
+            </div>
+          )}
           {portInvalid && <p className="text-[10px] text-danger">Enter an integer between 1 and 65535</p>}
           {saveError && <p className="text-[10px] text-danger">{saveError}</p>}
           <div className="flex items-center justify-end gap-2">
-            <button type="button" onClick={() => { setPortDraft(String(llmPort)); setSaveError(null); setShowSettings(false); }} disabled={saving} className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">Cancel</button>
+            <button type="button" onClick={() => { setPortDraft(String(llmPort)); setSaveError(null); resetModelList(); setShowSettings(false); }} disabled={saving} className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50">Cancel</button>
             <button type="button" onClick={() => void handleSavePort()} disabled={saving || portInvalid || (!portDirty && parsedPort === llmPort)} className="rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50">{saving ? "Saving\u2026" : "Save"}</button>
           </div>
         </div>
@@ -628,7 +695,7 @@ export function LlmPanel({ llm, sparkId, llmPort, onLlmPortChange, onRemovePort,
             <div className="llm-header-meta">
               <span className="llm-header-field"><span className="llm-header-key">Model</span><span className="llm-header-val truncate" title={llm?.modelId ?? ""}>{llm?.modelId || "\u2014"}</span></span>
               <span className="llm-header-field"><span className="llm-header-key">Backend</span><span className="llm-header-val"><BackendBadge backend={llm?.backend ?? null} /></span></span>
-              <span className="llm-header-field"><span className="llm-header-key">Context</span><span className="llm-header-val font-tabular">{llm?.contextLength ? llm.contextLength.toLocaleString() : "\u2014"}</span></span>
+              <span className="llm-header-field"><span className="llm-header-key">Context</span><span className="llm-header-val font-tabular">{formatContextLength(llm?.contextLength)}</span></span>
               <span className="llm-header-field"><span className="llm-header-key">Port</span><span className="llm-header-val font-tabular">:{llmPort}</span></span>
             </div>
           </div>

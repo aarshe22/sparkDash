@@ -253,6 +253,24 @@ export function updateLlmPort(
   });
 }
 
+export interface LlmListedModel {
+  id: string;
+  ownedBy?: string;
+  contextLength?: number | null;
+}
+
+export interface LlmModelsResponse {
+  ok: boolean;
+  port: number | null;
+  models: LlmListedModel[];
+  error?: string;
+}
+
+/** Query GET /v1/models on a Spark's LAN IP + port. */
+export function listLlmModels(id: string, port: number): Promise<LlmModelsResponse> {
+  return apiFetch(`/api/sparks/${id}/llm/models?port=${encodeURIComponent(String(port))}`);
+}
+
 // ─── Power management ────────────────────────────────────
 export interface PowerResult {
   success: boolean;

@@ -54,6 +54,50 @@ function fmtStorage(mb: number, unit: boolean): string {
   return unit ? `${s} ${label}` : s;
 }
 
+/** Split "GX10A — NEMOTRON 3.5 30B" into host + model for a two-line card title. */
+function splitHostModel(name: string): { host: string; model: string | null } {
+  const em = name.match(/^(.*?)\s*[—–]\s*(.+)$/);
+  if (em) return { host: em[1].trim(), model: em[2].trim() };
+  const hyphen = name.match(/^(.*?)\s+-\s+(.+)$/);
+  if (hyphen) return { host: hyphen[1].trim(), model: hyphen[2].trim() };
+  return { host: name, model: null };
+}
+
+function CardTitle({
+  name,
+  sparkId,
+  onSelect,
+}: {
+  name: string;
+  sparkId: string;
+  onSelect?: (id: string) => void;
+}) {
+  const { host, model } = splitHostModel(name);
+  const inner = (
+    <>
+      <span className="overview-card-host">{host}</span>
+      {model ? <span className="overview-card-model">{model}</span> : null}
+    </>
+  );
+  if (onSelect) {
+    return (
+      <button
+        type="button"
+        onClick={() => onSelect(sparkId)}
+        className="overview-card-title"
+        title={name}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className="overview-card-title" title={name}>
+      {inner}
+    </div>
+  );
+}
+
 function MiniStat({
   label,
   value,
@@ -78,12 +122,14 @@ function MiniStat({
             ? "text-success"
             : "text-text";
   return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[10px] tracking-wide text-muted">{label}</span>
+    <div className="overview-mini-stat">
+      <span className="overview-mini-stat-label text-[10px] tracking-wide text-muted">{label}</span>
       <span
-        className={`font-tabular text-[13px] truncate ${bold ? "font-semibold" : ""} ${toneClass}`}
-        title={title}
-      >{value}</span>
+        className={`overview-mini-stat-value font-tabular text-[13px] ${bold ? "font-semibold" : ""} ${toneClass}`}
+        title={title ?? value}
+      >
+        {value}
+      </span>
     </div>
   );
 }
@@ -133,24 +179,14 @@ function SparkCard({
       }}
     >
       {/* Card header */}
-      <div className="overview-card-head flex items-center gap-2.5">
+      <div className="overview-card-head flex items-start gap-2.5">
         <span
-          className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-success dot-glow-success" : "bg-danger"}`}
+          className={`mt-[6px] h-2 w-2 shrink-0 rounded-full ${online ? "bg-success dot-glow-success" : "bg-danger"}`}
         />
-        <span className="min-w-0 flex-1 truncate text-[15px] font-semibold text-text-strong">
-          {onSelect ? (
-            <button
-              type="button"
-              onClick={() => onSelect(spark.id)}
-              className="text-left font-inherit text-inherit hover:underline"
-            >
-              {spark.name}
-            </button>
-          ) : (
-            spark.name
-          )}
-        </span>
-        <span className="text-[10px] uppercase tracking-wide text-muted">
+        <div className="min-w-0 flex-1">
+          <CardTitle name={spark.name} sparkId={spark.id} onSelect={onSelect} />
+        </div>
+        <span className="mt-[5px] text-[10px] uppercase tracking-wide text-muted">
           {online ? "online" : "offline"}
         </span>
       </div>
@@ -191,9 +227,7 @@ function SparkCard({
           {/* Secondary stats */}
           <div
             className={
-              horizontal
-                ? "overview-card-stats"
-                : "mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5"
+              horizontal ? "overview-card-stats" : "overview-stats overview-stats--stacked"
             }
           >
             <MiniStat
@@ -419,13 +453,7 @@ export function OverviewPage({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
-      <div className="flex flex-wrap items-end justify-between gap-6">
-        <h1
-          className="font-normal leading-tight tracking-tight text-text-strong"
-          style={{ fontSize: "var(--density-overview-title)" }}
-        >
-          Overview
-        </h1>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <div className="flex items-center gap-3">
           {batchMsg && (
             <span className={`text-[11px] ${batchMsg.tone === "ok" ? "text-success" : "text-danger"}`}>

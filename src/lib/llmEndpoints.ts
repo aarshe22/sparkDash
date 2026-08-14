@@ -13,15 +13,10 @@ export interface LlmEndpoint {
   generationTps: number;
 }
 
-/** Format a context window for compact card display. */
+/** Format a context window as a full token count with grouping commas. */
 export function formatContextLength(n: number | null | undefined): string {
   if (n == null || n <= 0) return "—";
-  if (n >= 1_000_000) {
-    const millions = Math.round(n / 100_000) / 10;
-    return `${Number.isInteger(millions) ? millions.toFixed(0) : String(millions)}M`;
-  }
-  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
-  return n.toLocaleString();
+  return Math.round(n).toLocaleString("en-US");
 }
 
 /** Configured LLM ports for a Spark, in display order. */
