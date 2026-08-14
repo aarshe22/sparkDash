@@ -1,7 +1,7 @@
 /**
  * Persist / probe helper for spark.llmEngine.
  * @param {unknown} value
- * @returns {"vllm" | "sglang" | "ollama" | "auto"}
+ * @returns {"vllm" | "sglang" | "llamacpp" | "ollama" | "auto"}
  */
 export function normalizeLlmEngine(value) {
   const v = String(value ?? "")
@@ -11,5 +11,6 @@ export function normalizeLlmEngine(value) {
   if (v === "sglang" || v === "sgl") return "sglang";
   if (v === "ollama") return "ollama";
   if (v === "vllm") return "vllm";
+  if (v === "llamacpp" || v === "llama.cpp") return "llamacpp";
   return "auto";
 }

@@ -54,10 +54,10 @@ export interface SparkConfig {
    */
   llmMonitoring?: boolean;
   /**
-   * Which OpenAI-compatible engine to probe when LLM monitoring is on.
-   * `auto` detects SGLang (native info / sglang metrics) before vLLM.
+   * Which engine to probe when LLM monitoring is on.
+   * `auto` detects llama.cpp (/slots), then SGLang, then vLLM.
    */
-  llmEngine?: "vllm" | "sglang" | "ollama" | "auto";
+  llmEngine?: "vllm" | "sglang" | "llamacpp" | "ollama" | "auto";
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
 }
@@ -409,8 +409,8 @@ export interface SparkSnapshot {
   workerHeadId?: string | null;
   /** Standalone: whether LLM is probed (head always true, worker always false) */
   llmMonitoring?: boolean;
-  /** Engine hint for the LLM probe: vllm | sglang | auto */
-  llmEngine?: "vllm" | "sglang" | "ollama" | "auto";
+  /** Engine hint for the LLM probe: vllm | sglang | llamacpp | ollama | auto */
+  llmEngine?: "vllm" | "sglang" | "llamacpp" | "ollama" | "auto";
   /** LLM server port (first port, for backward compat) */
   llmPort: number;
   /** All LLM server ports configured for this Spark */

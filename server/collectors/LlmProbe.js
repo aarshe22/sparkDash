@@ -292,8 +292,11 @@ export class LlmProbe {
   async _detectServerType() {
     const preferred = this._preferredEngine();
 
-    // llama.cpp /slots — skip when the user forced vLLM or SGLang
-    if (preferred !== "vllm" && preferred !== "sglang") {
+    // llama.cpp /slots — skip when the user forced vLLM, SGLang, or Ollama
+    if (
+      preferred === "llamacpp" ||
+      (preferred !== "vllm" && preferred !== "sglang" && preferred !== "ollama")
+    ) {
       const slotUrl = `${this.baseUrl}/slots`;
       try {
         const slotRes = await this._fetch(slotUrl);
@@ -306,6 +309,11 @@ export class LlmProbe {
           }
         }
       } catch {}
+      if (preferred === "llamacpp") {
+        this.serverIsOpenAI = false;
+        this.backendType = "llama.cpp";
+        return;
+      }
     }
 
     // Try OpenAI-compatible
@@ -340,6 +348,11 @@ export class LlmProbe {
         }
         if (preferred === "ollama") {
           this.backendType = "ollama";
+          return;
+        }
+        if (preferred === "llamacpp") {
+          this.serverIsOpenAI = false;
+          this.backendType = "llama.cpp";
           return;
         }
         if (preferred === "vllm") {
@@ -638,7 +651,9 @@ export class LlmProbe {
 
     const preferred = this._preferredEngine();
     const forceSglang = preferred === "sglang" || this.backendType === "sglang";
-    const skipSglang = preferred === "vllm" && this.backendType !== "sglang";
+    const skipSglang =
+      (preferred === "vllm" || preferred === "ollama" || preferred === "llamacpp") &&
+      this.backendType !== "sglang";
 
     if (!skipSglang && (forceSglang || this.backendType !== "vllm")) {
       try {

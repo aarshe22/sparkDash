@@ -1,6 +1,19 @@
-export type LlmEngine = "vllm" | "sglang" | "ollama" | "auto";
+export type LlmEngine = "vllm" | "sglang" | "llamacpp" | "ollama" | "auto";
+
+export type LlmMonitoringChoice = Exclude<LlmEngine, "auto"> | "off";
 
 export type EngineMarkKind = "vllm" | "sglang" | "ollama" | "comfy" | "llama.cpp" | "ds4";
+
+export const MONITORING_ENGINE_OPTIONS: {
+  id: Exclude<LlmEngine, "auto">;
+  label: string;
+  shortLabel: string;
+}[] = [
+  { id: "vllm", label: "vLLM monitoring", shortLabel: "vLLM" },
+  { id: "sglang", label: "SGLang monitoring", shortLabel: "SGLang" },
+  { id: "llamacpp", label: "llama.cpp monitoring", shortLabel: "llama.cpp" },
+  { id: "ollama", label: "Ollama monitoring", shortLabel: "Ollama" },
+];
 
 export function normalizeLlmEngine(value: unknown): LlmEngine {
   const v = String(value ?? "")
@@ -10,12 +23,13 @@ export function normalizeLlmEngine(value: unknown): LlmEngine {
   if (v === "sglang" || v === "sgl") return "sglang";
   if (v === "ollama") return "ollama";
   if (v === "vllm") return "vllm";
+  if (v === "llamacpp" || v === "llama.cpp") return "llamacpp";
   return "auto";
 }
 
 export function monitoringEngineDraft(value: unknown): Exclude<LlmEngine, "auto"> {
   const engine = normalizeLlmEngine(value);
-  if (engine === "sglang" || engine === "ollama") return engine;
+  if (engine !== "auto") return engine;
   return "vllm";
 }
 
@@ -30,7 +44,7 @@ export function selectedLlmMonitoring(
     llmMonitoring?: boolean | null;
     llmEngine?: string | null;
   }
-): "vllm" | "sglang" | "ollama" | "off" {
+): LlmMonitoringChoice {
   const role =
     spark.role === "head" || spark.role === "worker" || spark.role === "standalone"
       ? spark.role
@@ -40,14 +54,11 @@ export function selectedLlmMonitoring(
   if (role === "worker") return "off";
   const monitoringOn = role === "head" ? true : spark.llmMonitoring !== false;
   if (!monitoringOn) return "off";
-  const engine = normalizeLlmEngine(spark.llmEngine);
-  if (engine === "sglang") return "sglang";
-  if (engine === "ollama") return "ollama";
-  return "vllm";
+  return monitoringEngineDraft(spark.llmEngine);
 }
 
 export function llmEnginePatch(
-  choice: "vllm" | "sglang" | "ollama" | "off",
+  choice: LlmMonitoringChoice,
   role: "head" | "worker" | "standalone"
 ): { llmMonitoring: boolean; llmEngine: LlmEngine } {
   if (role === "worker") return { llmMonitoring: false, llmEngine: "auto" };
@@ -72,6 +83,11 @@ function liveBackendKind(spark: {
   return null;
 }
 
+function markForChoice(choice: Exclude<LlmEngine, "auto">): EngineMarkKind {
+  if (choice === "llamacpp") return "llama.cpp";
+  return choice;
+}
+
 /** Icons shown under the model name on overview / spark header. */
 export function sparkEngineMarks(spark: {
   role?: string | null;
@@ -83,15 +99,15 @@ export function sparkEngineMarks(spark: {
 }): EngineMarkKind[] {
   const kinds: EngineMarkKind[] = [];
   const selected = selectedLlmMonitoring(spark);
-  if (selected === "sglang" || selected === "ollama") {
-    kinds.push(selected);
-  } else if (selected === "vllm") {
+  if (selected === "vllm") {
     const engine = normalizeLlmEngine(spark.llmEngine);
     if (engine === "auto") {
       kinds.push(liveBackendKind(spark) ?? "vllm");
     } else {
       kinds.push("vllm");
     }
+  } else if (selected !== "off") {
+    kinds.push(markForChoice(selected));
   }
   if (spark.comfyMonitoring) kinds.push("comfy");
   return kinds;

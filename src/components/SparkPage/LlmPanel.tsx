@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { LlmMetrics, SlotTelemetry, RecipeMetadata, RecipeInfo } from "../../api/types";
 import { listLlmModels, updateLlmPort, updateSpark, type LlmListedModel } from "../../api/client";
 import { formatContextLength } from "../../lib/llmEndpoints";
-import { monitoringEngineDraft, type LlmEngine } from "../../lib/llmEngine";
+import { MONITORING_ENGINE_OPTIONS, monitoringEngineDraft, type LlmEngine } from "../../lib/llmEngine";
 import { withDashboardPath } from "../../lib/dashboardPath";
 import { Panel } from "../ui/Panel";
 import { TelemetryChart, type ChartSeries } from "../ui/TelemetryChart";
@@ -705,36 +705,18 @@ export function LlmPanel({ llm, sparkId, llmPort, llmEngine, haproxyPublicPort =
           </label>
           <fieldset className="space-y-1.5">
             <legend className="text-xs text-muted">Engine monitoring</legend>
-            <label className="flex items-center gap-2 text-xs text-muted">
-              <input
-                type="radio"
-                name={`llm-engine-${sparkId}-${llmPort}`}
-                checked={engineDraft === "vllm"}
-                onChange={() => { setEngineDraft("vllm"); setSaveError(null); }}
-                className="accent-[var(--color-accent)]"
-              />
-              <span>vLLM monitoring</span>
-            </label>
-            <label className="flex items-center gap-2 text-xs text-muted">
-              <input
-                type="radio"
-                name={`llm-engine-${sparkId}-${llmPort}`}
-                checked={engineDraft === "sglang"}
-                onChange={() => { setEngineDraft("sglang"); setSaveError(null); }}
-                className="accent-[var(--color-accent)]"
-              />
-              <span>SGLang monitoring</span>
-            </label>
-            <label className="flex items-center gap-2 text-xs text-muted">
-              <input
-                type="radio"
-                name={`llm-engine-${sparkId}-${llmPort}`}
-                checked={engineDraft === "ollama"}
-                onChange={() => { setEngineDraft("ollama"); setSaveError(null); }}
-                className="accent-[var(--color-accent)]"
-              />
-              <span>Ollama monitoring</span>
-            </label>
+            {MONITORING_ENGINE_OPTIONS.map((opt) => (
+              <label key={opt.id} className="flex items-center gap-2 text-xs text-muted">
+                <input
+                  type="radio"
+                  name={`llm-engine-${sparkId}-${llmPort}`}
+                  checked={engineDraft === opt.id}
+                  onChange={() => { setEngineDraft(opt.id); setSaveError(null); }}
+                  className="accent-[var(--color-accent)]"
+                />
+                <span>{opt.label}</span>
+              </label>
+            ))}
           </fieldset>
           {(listedModels != null || modelsError) && (
             <div className="space-y-1.5 rounded-md border border-border bg-surface-elevated px-3 py-2">

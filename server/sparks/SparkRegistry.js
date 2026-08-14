@@ -355,8 +355,8 @@ export class SparkRegistry {
       llmMonitoring:
         role === "worker" ? false : role === "head" ? true : config.llmMonitoring !== false,
       /**
-       * Which OpenAI-compatible engine to probe: vllm | sglang | auto.
-       * Auto detects SGLang before falling back to vLLM.
+       * Which engine to probe: vllm | sglang | llamacpp | ollama | auto.
+       * Auto detects llama.cpp (/slots), then SGLang, then vLLM.
        */
       llmEngine: isWorker ? "auto" : normalizeLlmEngine(config.llmEngine),
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],

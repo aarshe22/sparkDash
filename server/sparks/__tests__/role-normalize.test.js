@@ -11,6 +11,8 @@ test("llmEngine persists for head/standalone and clears on worker", () => {
   assert.equal(n({ role: "standalone", llmEngine: "sglang" }).llmEngine, "sglang");
   assert.equal(n({ role: "head", llmEngine: "vllm" }).llmEngine, "vllm");
   assert.equal(n({ role: "standalone", llmEngine: "ollama" }).llmEngine, "ollama");
+  assert.equal(n({ role: "standalone", llmEngine: "llamacpp" }).llmEngine, "llamacpp");
+  assert.equal(n({ role: "standalone", llmEngine: "llama.cpp" }).llmEngine, "llamacpp");
   assert.equal(n({ role: "standalone", llmEngine: "SG-Lang" }).llmEngine, "sglang");
   assert.equal(n({ role: "worker", llmEngine: "sglang" }).llmEngine, "auto");
 });
