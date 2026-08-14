@@ -672,10 +672,15 @@ function SparkCard({
                 <span className="text-sm font-normal text-muted"> tok/s</span>
                 {benchmark && (
                   <div
-                    className="mt-1.5 font-tabular text-[10px] text-accent"
+                    className="mt-2"
                     title={`Most recent successful benchmark on port ${benchmark.port}, completed ${new Date(benchmark.completedAt).toLocaleString()}`}
                   >
-                    Bench {benchmark.aggregateTps.toFixed(1)} tok/s @ {benchmark.concurrency}×
+                    <span className="overview-card-tps-value font-tabular text-[28px] font-bold leading-none text-text-strong">
+                      {benchmark.aggregateTps.toFixed(1)}
+                    </span>
+                    <span className="text-sm font-normal text-muted">
+                      {" "}bench tok/s @ {benchmark.concurrency}×
+                    </span>
                   </div>
                 )}
               </div>
