@@ -1142,6 +1142,7 @@ export class LlmProbe {
   _getSnapshot() {
     const snap = {
       available: this.serverIsOpenAI !== null,
+      port: this.port,
       backend: this.backendType,
       modelId: this.modelId || null,
       modelPath: this.modelPath || null,
@@ -1218,6 +1219,7 @@ export class LlmProbe {
   _defaultLlm() {
     const snap = {
       available: false,
+      port: this.port,
       backend: null,
       modelId: null,
       modelPath: null,

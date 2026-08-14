@@ -171,6 +171,7 @@ export class SparkMonitor {
       name: this.spark.name,
       online: this.online,
       uptime: this._uptimeSeconds,
+      lanIp: this.spark.lanIp || "",
       disabledDevices: this.spark.disabledDevices || [],
       disabledInterfaces: this.spark.disabledInterfaces || [],
       storagePollDisabled: Boolean(this.spark.storagePollDisabled),

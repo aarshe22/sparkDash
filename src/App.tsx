@@ -10,8 +10,10 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { GearIcon, BoltIcon } from "./components/ui/icons";
+import { GearIcon, BoltIcon, DownloadIcon } from "./components/ui/icons";
 import { OVERVIEW_ID } from "./constants";
+import { downloadOpencodeConfig } from "./lib/opencodeConfig";
+import { liveMonitoredModels } from "./lib/llmEndpoints";
 import type { Settings, SparkSnapshot } from "./api/types";
 
 function placeholderSnapshot(
@@ -199,20 +201,45 @@ function DashboardApp() {
     }
   }, []);
 
+  const liveOpencodeCount = useMemo(() => liveMonitoredModels(displaySparks).length, [displaySparks]);
+  const handleDownloadOpencode = useCallback(() => {
+    downloadOpencodeConfig(displaySparks);
+  }, [displaySparks]);
+
   return (
     <div className="min-h-screen p-0 text-text sm:p-8">
       <div className="dashboard-shell">
         <header className="flex flex-wrap items-center gap-3" style={{ marginBottom: "var(--density-header-gap)" }}>
-          <button
-            type="button"
-            onClick={() => navigate(OVERVIEW_ID)}
-            className="logo-pill"
-          >
-            <BoltIcon className="h-3.5 w-3.5 text-accent" />
-            <span>
-              spark<span className="logo-pill-dash">Dash</span>
-            </span>
-          </button>
+          <div className="logo-brand">
+            <button
+              type="button"
+              onClick={() => navigate(OVERVIEW_ID)}
+              className="logo-pill"
+            >
+              <BoltIcon className="h-3.5 w-3.5 text-accent" />
+              <span>
+                spark<span className="logo-pill-dash">Dash</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="opencode-download"
+              onClick={handleDownloadOpencode}
+              disabled={liveOpencodeCount === 0}
+              title={
+                liveOpencodeCount === 0
+                  ? "No live monitored models to export"
+                  : `Download OpenCode config for ${liveOpencodeCount} live model${liveOpencodeCount === 1 ? "" : "s"}`
+              }
+              aria-label="Download opencode.json"
+            >
+              <DownloadIcon className="h-3 w-3" />
+              <span>opencode.json</span>
+              {liveOpencodeCount > 0 ? (
+                <span className="opencode-download-count">{liveOpencodeCount}</span>
+              ) : null}
+            </button>
+          </div>
           <SparkTabs
             sparks={displaySparks}
             activeId={displayActive?.id ?? activeId}

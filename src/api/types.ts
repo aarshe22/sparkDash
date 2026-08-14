@@ -215,6 +215,8 @@ export interface RecipeInfo {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
+  /** HTTP port this probe is watching (vLLM / llama.cpp / sglang / ds4). */
+  port?: number;
   backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
   modelId: string | null;
   modelPath: string | null;
@@ -385,6 +387,8 @@ export interface SparkSnapshot {
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;
+  /** LAN IP for OpenCode / browser deep-links. */
+  lanIp?: string;
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;

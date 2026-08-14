@@ -1,9 +1,10 @@
 import { useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
-import { resolveSparkRole } from "../../api/sparkRole";
+import { isLlmMonitoringEnabled, resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
 import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { formatContextLength, sparkLlmEndpoints } from "../../lib/llmEndpoints";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -234,9 +235,9 @@ function SparkCard({
                 );
               }
 
-              // Head / Standalone: same as before — live backend + model id.
-              const llmArr = spark.metrics.llm;
-              const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
+              // Head / Standalone: live backend + model id.
+              if (!isLlmMonitoringEnabled(spark)) return null;
+              const llm = sparkLlmEndpoints(spark).find((l) => l.available);
               if (!llm) return null;
               return (
                 <MiniStat
@@ -250,8 +251,37 @@ function SparkCard({
           </div>
 
           {(() => {
-            const llmArr = spark.metrics.llm;
-            const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
+            if (!isLlmMonitoringEnabled(spark)) return null;
+            const rows = sparkLlmEndpoints(spark);
+            if (rows.length === 0) return null;
+            return (
+              <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+                {rows.map((row) => (
+                  <div key={row.port} className="contents">
+                    <MiniStat
+                      label="Port"
+                      value={`:${row.port}`}
+                      tone={row.available ? "accent" : "default"}
+                      title={`LLM HTTP port ${row.port}${row.available ? " (live)" : " (not reachable)"}`}
+                    />
+                    <MiniStat
+                      label="Context"
+                      value={formatContextLength(row.contextLength)}
+                      title={
+                        row.contextLength
+                          ? `${row.contextLength.toLocaleString()} token context window`
+                          : "Context length unknown"
+                      }
+                      bold={false}
+                    />
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          {(() => {
+            const llm = sparkLlmEndpoints(spark).find((l) => l.available);
             if (!llm) return null;
             return (
               <div className="mt-3.5 border-t border-border pt-3 text-center">
@@ -392,7 +422,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           </span>
         </div>
       </div>
-      <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
+      <div className="overview-page grid grid-cols-2 lg:grid-cols-4" style={{ gap: "var(--density-page-gap)" }}>
         {visibleSparks.map((spark) => (
           <SparkCard
             key={spark.id}

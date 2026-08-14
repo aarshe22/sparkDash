@@ -17,6 +17,7 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
+import { buildOpencodeConfig } from "./opencodeConfig.js";
 
 dotenv.config();
 
@@ -244,6 +245,12 @@ app.put("/api/sparks/order", (req, res) => {
 // ─── Global settings ──────────────────────────────────────
 app.get("/api/settings", (_req, res) => {
   res.json(getSettings());
+});
+
+app.get("/api/opencode.json", (_req, res) => {
+  const config = buildOpencodeConfig(orderedSnapshots());
+  res.setHeader("Content-Disposition", 'attachment; filename="opencode.json"');
+  res.json(config);
 });
 
 app.put("/api/settings", (req, res) => {

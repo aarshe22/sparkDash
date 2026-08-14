@@ -46,6 +46,11 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
+### Unreleased
+- Overview cards show each LLM **port** and **context length**
+- Downloadable **opencode.json** under the sparkDash logo (live IP / port / model / max context)
+- Overview grid: **2 cards** on smaller screens, **4 cards** on wide screens
+
 ### Version 1.3.0 — major feature release
 - **LLM Prompt Showcase** — full-page multi-terminal streaming demo (up to 32 concurrent prompts) from the LLM panel
 - Aggregate server tok/s during runs, copy one/all terminals, collapsible reasoning, thinking-flag adapter
@@ -82,7 +87,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 ## Quick start
 
 ```bash
-git clone https://github.com/MiaAI-Lab/sparkDash.git
+git clone https://github.com/aarshe22/sparkDash.git
 cd sparkDash
 
 # Production (Docker)
