@@ -21,15 +21,18 @@ const LLM_PROBE_TIMEOUT_MS = 3000;
 const SSH_CONNECT_TIMEOUT = 5; // seconds
 
 // ─── Poll intervals (milliseconds) ───────────────────────
-const POLL_INTERVAL_GPU = parseInt(process.env.POLL_INTERVAL_GPU || "2000", 10);
-const POLL_INTERVAL_CPU = parseInt(process.env.POLL_INTERVAL_CPU || "2000", 10);
-const POLL_INTERVAL_NETWORK = parseInt(process.env.POLL_INTERVAL_NETWORK || "2000", 10);
-const POLL_INTERVAL_STORAGE = parseInt(process.env.POLL_INTERVAL_STORAGE || "5000", 10);
-const POLL_INTERVAL_LLM = parseInt(process.env.POLL_INTERVAL_LLM || "2000", 10);
-// dmon -c 1 -d 1 blocks ~1s; default 2s avoids stacking with in-flight guards
-const POLL_INTERVAL_BANDWIDTH = parseInt(process.env.POLL_INTERVAL_BANDWIDTH || "2000", 10);
+// Background per-domain cadence if a poller loop is re-enabled. Live dashboard
+// sampling is trigger-driven (open WS clients) at settings.pollIntervalMs and
+// does not wait on these values.
+const POLL_INTERVAL_GPU = parseInt(process.env.POLL_INTERVAL_GPU || "30000", 10);
+const POLL_INTERVAL_CPU = parseInt(process.env.POLL_INTERVAL_CPU || "30000", 10);
+const POLL_INTERVAL_NETWORK = parseInt(process.env.POLL_INTERVAL_NETWORK || "30000", 10);
+const POLL_INTERVAL_STORAGE = parseInt(process.env.POLL_INTERVAL_STORAGE || "30000", 10);
+const POLL_INTERVAL_LLM = parseInt(process.env.POLL_INTERVAL_LLM || "30000", 10);
+// dmon -c 1 -d 1 blocks ~1s; 30s leaves plenty of room vs in-flight guards
+const POLL_INTERVAL_BANDWIDTH = parseInt(process.env.POLL_INTERVAL_BANDWIDTH || "30000", 10);
 // Dedicated liveness (sshTest / local ping) cadence — not a metric domain.
-const POLL_INTERVAL_LIVENESS = parseInt(process.env.POLL_INTERVAL_LIVENESS || "5000", 10);
+const POLL_INTERVAL_LIVENESS = parseInt(process.env.POLL_INTERVAL_LIVENESS || "30000", 10);
 
 // ─── Port ────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "5555", 10);

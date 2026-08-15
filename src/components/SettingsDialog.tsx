@@ -28,12 +28,13 @@ function useEscape(onClose: () => void) {
   }, [onClose]);
 }
 
-const POLL_PRESETS = [
-  { label: "1s", value: 1000 },
-  { label: "2s", value: 2000 },
-  { label: "5s", value: 5000 },
-  { label: "10s", value: 10000 },
-];
+const POLL_SLIDER_MIN_S = 1;
+const POLL_SLIDER_MAX_S = 30;
+
+function pollSeconds(ms: number) {
+  const s = Math.round(ms / 1000);
+  return Math.min(POLL_SLIDER_MAX_S, Math.max(POLL_SLIDER_MIN_S, s));
+}
 
 export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -201,23 +202,33 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
           <div className="space-y-4">
             {/* Poll interval */}
             <div>
-              <label className="mb-2 block text-xs text-muted">Poll interval</label>
-              <div className="flex gap-2">
-                {POLL_PRESETS.map((preset) => (
-                  <button
-                    key={preset.value}
-                    type="button"
-                    onClick={() => update({ pollIntervalMs: preset.value })}
-                    className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                      settings.pollIntervalMs === preset.value
-                        ? "bg-accent text-white"
-                        : "border border-border bg-surface-elevated text-muted hover:bg-surface-hover"
-                    }`}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
+              <div className="mb-2 flex items-baseline justify-between gap-3">
+                <label htmlFor="poll-interval" className="text-xs text-muted">
+                  Poll interval
+                </label>
+                <span className="font-tabular text-xs font-medium text-text-strong">
+                  {pollSeconds(settings.pollIntervalMs)}s
+                </span>
               </div>
+              <input
+                id="poll-interval"
+                type="range"
+                min={POLL_SLIDER_MIN_S}
+                max={POLL_SLIDER_MAX_S}
+                step={1}
+                value={pollSeconds(settings.pollIntervalMs)}
+                onChange={(e) =>
+                  update({ pollIntervalMs: parseInt(e.target.value, 10) * 1000 })
+                }
+                className="settings-poll-slider"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-muted">
+                <span>1s (live)</span>
+                <span>30s (calm)</span>
+              </div>
+              <p className="mt-1 text-[10px] text-muted">
+                Trigger rate while the dashboard is connected. Collectors stay idle with no viewers, and this slider wins over any background poller cadence.
+              </p>
             </div>
 
             {/* Default LLM port */}

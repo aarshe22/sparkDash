@@ -7,7 +7,7 @@ import type { HaproxyStatus, SparkSnapshot } from "../api/types";
  * Fed once per WebSocket snapshot by useSnapshot. Components read time-series
  * via `useMetricsHistory` / `useMetricsHistoryTail` — a single source of truth that:
  *   - survives Spark tab switches (history is no longer per-panel useState),
- *   - caps each series at HISTORY_MAX samples (1 h at the default 2 s poll),
+ *   - caps each series at HISTORY_MAX samples (15 h at the default 30 s poll),
  *   - lets future time-range charts read from one place,
  *   - keeps sparklines on a short tail (SPARKLINE_TAIL) so 84px charts stay readable.
  *
@@ -21,8 +21,8 @@ import type { HaproxyStatus, SparkSnapshot } from "../api/types";
  * All listeners are woken on notify; unchanged keys keep the same ref → no render.
  */
 
-const HISTORY_MAX = 1800; // 1 h at 2 s poll — the WS interval, not wall-clock guarantees
-/** Samples shown in inline sparklines (≈1 min at 2 s poll). Full series stays in HISTORY_MAX. */
+const HISTORY_MAX = 1800; // 15 h at 30 s poll — the WS interval, not wall-clock guarantees
+/** Samples shown in inline sparklines (≈15 min at 30 s poll). Full series stays in HISTORY_MAX. */
 export const SPARKLINE_TAIL = 30;
 
 const history = new Map<string, number[]>(); // key: `${sparkId}:${metric}`

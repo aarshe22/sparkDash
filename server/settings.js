@@ -34,7 +34,7 @@ export const DEFAULT_HAPROXY_SETTINGS = Object.freeze({
 });
 
 const DEFAULTS = Object.freeze({
-  pollIntervalMs: 2000,
+  pollIntervalMs: 30000,
   defaultLlmPort: 8888,
   autoHideOffline: false,
   temperatureUnit: "celsius",
@@ -57,9 +57,11 @@ let _settings = { ...DEFAULTS };
 
 function _clampSettings(settings) {
   const s = { ...settings };
-  // Clamp poll interval to 1000ms minimum
+  // Clamp poll interval to 1–30s (Settings slider range)
   if (typeof s.pollIntervalMs !== "number" || s.pollIntervalMs < 1000) {
     s.pollIntervalMs = 1000;
+  } else if (s.pollIntervalMs > 30_000) {
+    s.pollIntervalMs = 30_000;
   }
   // Clamp LLM port to 1–65535
   if (typeof s.defaultLlmPort !== "number" || s.defaultLlmPort < 1 || s.defaultLlmPort > 65535) {

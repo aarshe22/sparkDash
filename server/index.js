@@ -66,6 +66,11 @@ const registry = new SparkRegistry();
 // ─── Monitor map ─────────────────────────────────────────
 const monitors = new Map();
 
+// Demand-trigger state (armed only while a dashboard WS client is connected)
+let triggerTimer = null;
+let triggerInflight = false;
+let _lastBroadcastPayload = null;
+
 // ─── Start monitor for a Spark ───────────────────────────
 function startMonitor(spark) {
   if (monitors.has(spark.id)) return;
@@ -319,9 +324,9 @@ app.put("/api/settings", (req, res) => {
       }
     }
     const newSettings = updateSettings(patch);
-    // If poll interval changed, restart the broadcast timer
+    // Slider owns the trigger cadence, independent of collector env intervals.
     if (patch.pollIntervalMs != null) {
-      restartBroadcast();
+      restartTrigger();
     }
     res.json(newSettings);
   } catch (err) {
@@ -779,7 +784,7 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
                     }
                   : null;
 
-              // Local: fresh collect so the timeline isn't stuck on the 2s poll cache.
+              // Local: fresh collect so the timeline isn't stuck on the poll cache.
               // Remote: use snapshot only — SSH collectGpu every 1s is too heavy mid-bench.
               if (spark.isLocal) {
                 try {
@@ -1183,19 +1188,25 @@ app.get("*splat", (_req, res) => {
 const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws) => {
   console.log("[ws] client connected");
-  // Send the initial snapshot through the same path the broadcast uses so the
-  // new client benefits from the same payload format (and bufferedAmount
-  // guard, although a freshly-open socket trivially passes it).
+  // Cached snapshot immediately; a trigger tick then refreshes collectors.
   broadcastPayload(buildSnapshotPayload());
+  armTrigger();
+  void runTrigger();
   ws.on("close", () => {
     console.log("[ws] client disconnected");
+    if (openWsCount() === 0) disarmTrigger();
   });
 });
 
-// ─── Broadcast snapshot (dynamic interval) ────────────────
-let broadcastTimer = null;
-let haproxyPollTimer = null;
-let _lastBroadcastPayload = null;
+// ─── Triggered sampling (slider cadence, only while watched) ─
+
+function openWsCount() {
+  let n = 0;
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) n++;
+  });
+  return n;
+}
 
 /** Build the snapshot payload string. Centralized so broadcast + refresh share it. */
 function buildSnapshotPayload() {
@@ -1232,41 +1243,61 @@ function broadcastPayload(payload) {
   });
 }
 
-function startBroadcast() {
-  const interval = getSettings().pollIntervalMs;
-  broadcastTimer = setInterval(() => {
+/**
+ * Collect + broadcast. Armed only while a dashboard client is connected.
+ * Interval comes from the settings slider, not SparkMonitor's env cadence.
+ */
+async function runTrigger() {
+  if (triggerInflight) return;
+  if (openWsCount() === 0) {
+    disarmTrigger();
+    return;
+  }
+  triggerInflight = true;
+  try {
+    await Promise.all([
+      ...[...monitors.values()].map((m) => m.triggerPoll()),
+      haproxyManager.pollStatus({ maxAgeMs: 9_000 }).catch((err) => {
+        console.error("[haproxy] status poll failed:", err.message);
+      }),
+    ]);
+    if (openWsCount() === 0) return;
     const payload = buildSnapshotPayload();
-    // Skip the broadcast entirely when nothing changed since the last tick.
-    // A 1s poll that produces identical snapshots becomes free for idle tabs.
     if (_lastBroadcastPayload !== null && payload === _lastBroadcastPayload) return;
     _lastBroadcastPayload = payload;
     broadcastPayload(payload);
+  } catch (err) {
+    console.error("[trigger] poll failed:", err.message);
+  } finally {
+    triggerInflight = false;
+  }
+}
+
+function armTrigger() {
+  if (triggerTimer) return;
+  const interval = getSettings().pollIntervalMs;
+  triggerTimer = setInterval(() => {
+    void runTrigger();
   }, interval);
 }
 
-function restartBroadcast() {
-  if (broadcastTimer) {
-    clearInterval(broadcastTimer);
-    broadcastTimer = null;
-  }
-  _lastBroadcastPayload = null; // force a fresh broadcast on the new cadence
-  startBroadcast();
+function disarmTrigger() {
+  if (!triggerTimer) return;
+  clearInterval(triggerTimer);
+  triggerTimer = null;
 }
 
-function startHaproxyPolling() {
-  const poll = () => {
-    haproxyManager.pollStatus({ maxAgeMs: 9_000 }).catch((err) => {
-      console.error("[haproxy] status poll failed:", err.message);
-    });
-  };
-  poll();
-  haproxyPollTimer = setInterval(poll, 10_000);
+function restartTrigger() {
+  disarmTrigger();
+  _lastBroadcastPayload = null;
+  if (openWsCount() > 0) {
+    armTrigger();
+    void runTrigger();
+  }
 }
 
 // ─── Start ───────────────────────────────────────────────
 loadSettings();
-startBroadcast();
-startHaproxyPolling();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[sparkDash] server listening on http://0.0.0.0:${PORT}`);
@@ -1281,13 +1312,9 @@ function shutdown(signal) {
   _shuttingDown = true;
   console.log(`[sparkDash] ${signal} received, shutting down…`);
   try {
-    if (broadcastTimer) {
-      clearInterval(broadcastTimer);
-      broadcastTimer = null;
-    }
-    if (haproxyPollTimer) {
-      clearInterval(haproxyPollTimer);
-      haproxyPollTimer = null;
+    if (triggerTimer) {
+      clearInterval(triggerTimer);
+      triggerTimer = null;
     }
     for (const m of monitors.values()) m.stop();
     monitors.clear();

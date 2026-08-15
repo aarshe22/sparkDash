@@ -3,22 +3,13 @@ import path from "path";
 import { SystemCollector } from "../collectors/SystemCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
 import { sshTest, sshExec } from "../collectors/ssh.js";
-import {
-  POLL_INTERVAL_GPU,
-  POLL_INTERVAL_CPU,
-  POLL_INTERVAL_NETWORK,
-  POLL_INTERVAL_STORAGE,
-  POLL_INTERVAL_LLM,
-  POLL_INTERVAL_BANDWIDTH,
-  POLL_INTERVAL_LIVENESS,
-  LLM_PORT,
-  HOST_PATHS,
-} from "../config.js";
+import { LLM_PORT, HOST_PATHS } from "../config.js";
 
 const ONLINE_GRACE_MS = 10000;
 
 /**
- * SparkMonitor — one per Spark. Owns collectors + rate state + poll loop.
+ * SparkMonitor — one per Spark. Owns collectors + rate state.
+ * Sampling is trigger-driven (see index.js): no private cadence.
  * Exposes snapshot() for WebSocket pushed payload.
  */
 export class SparkMonitor {
@@ -58,16 +49,12 @@ export class SparkMonitor {
     };
     this._lastUpdate = {};
 
-    // Timers
-    this._intervals = [];
-    /** @type {ReturnType<typeof setInterval> | null} */
-    this._llmIntervalId = null;
     this._running = false;
     /** @type {Record<string, boolean>} in-flight domain guards */
     this._inflight = {};
   }
 
-  /** Hot-update config without tearing down poll loops / rate baselines. */
+  /** Hot-update config without tearing down rate baselines. */
   updateConfig(spark) {
     const wasLlm = this._llmMonitoringEnabled(this.spark);
     this.spark = spark;
@@ -91,11 +78,8 @@ export class SparkMonitor {
     }
     if (!this._llmMonitoringEnabled()) {
       this._metrics.llm = [];
-    }
-
-    // Toggle LLM poll interval when monitoring enablement flips
-    if (this._running && wasLlm !== this._llmMonitoringEnabled()) {
-      this._restartLlmPollInterval();
+    } else if (this._running && !wasLlm) {
+      void this._pollDomain("llm");
     }
   }
 
@@ -108,20 +92,6 @@ export class SparkMonitor {
     if (role === "worker") return false;
     if (role === "head") return true;
     return spark?.llmMonitoring !== false;
-  }
-
-  /** Start or clear the LLM poll timer based on monitoring flag. */
-  _restartLlmPollInterval() {
-    if (this._llmIntervalId != null) {
-      clearInterval(this._llmIntervalId);
-      this._intervals = this._intervals.filter((id) => id !== this._llmIntervalId);
-      this._llmIntervalId = null;
-    }
-    if (this._llmMonitoringEnabled() && this._running) {
-      this._llmIntervalId = setInterval(() => this._pollDomain("llm"), POLL_INTERVAL_LLM);
-      this._intervals.push(this._llmIntervalId);
-      void this._pollDomain("llm");
-    }
   }
 
   /** Returns array of LLM ports from spark config. */
@@ -139,31 +109,24 @@ export class SparkMonitor {
     return [LLM_PORT];
   }
 
-  /** Start background polling. */
+  /** Arm this monitor. One boot sample; further samples come from triggerPoll(). */
   start() {
     if (this._running) return;
     this._running = true;
-    this._poll();
-    this._intervals.push(setInterval(() => this._pollDomain("gpu"), POLL_INTERVAL_GPU));
-    this._intervals.push(setInterval(() => this._pollDomain("cpu"), POLL_INTERVAL_CPU));
-    this._intervals.push(setInterval(() => this._pollDomain("network"), POLL_INTERVAL_NETWORK));
-    this._intervals.push(setInterval(() => this._pollDomain("storage"), POLL_INTERVAL_STORAGE));
-    this._intervals.push(setInterval(() => this._pollDomain("ram"), POLL_INTERVAL_CPU));
-    this._intervals.push(setInterval(() => this._pollDomain("memory"), POLL_INTERVAL_BANDWIDTH));
-    this._restartLlmPollInterval();
-    // Liveness on a slightly slower cadence
-    this._intervals.push(setInterval(() => this._checkOnline(), POLL_INTERVAL_LIVENESS));
+    void this._poll();
     console.log(`[SparkMonitor] ${this.spark.id} started — llmProbes=${this.llmProbes.size} ports=[${[...this.llmProbes.keys()].join(",")}] workerNode=${!!this.spark.workerNode}`);
   }
 
-  /** Stop background polling. */
+  /** Stop accepting triggers (in-flight collects still bail via _running). */
   stop() {
     this._running = false;
-    for (const id of this._intervals) clearInterval(id);
-    this._intervals = [];
-    this._llmIntervalId = null;
     this._inflight = {};
     console.log(`[SparkMonitor] ${this.spark.id} stopped`);
+  }
+
+  /** Demand-driven sample. Cadence lives on the trigger, not here. */
+  triggerPoll() {
+    return this._poll();
   }
 
   /** Return a full snapshot of this Spark's metrics. */
@@ -190,7 +153,7 @@ export class SparkMonitor {
       metrics: {
         // NOTE: no `timestamp` here on purpose. The broadcast path skips
         // snapshots whose JSON is byte-identical to the previous one (see
-        // startBroadcast); a per-snapshot Date.now() would defeat that cache,
+        // runTrigger); a per-snapshot Date.now() would defeat that cache,
         // forcing a broadcast + frontend re-render every tick even when all
         // measured values are unchanged. The frontend does not consume a
         // metrics timestamp; the WS receive time can serve if one is ever
