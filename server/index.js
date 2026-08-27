@@ -126,10 +126,10 @@ function clientKey(req) {
 }
 
 function hasValidAdminToken(req) {
-  const configured = process.env.SPARKDASH_ADMIN_TOKEN;
+  const configured = (process.env.SPARKDASH_ADMIN_TOKEN || "").trim();
   if (!configured) return false;
   const auth = req.get("authorization") || "";
-  const supplied = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const supplied = (auth.startsWith("Bearer ") ? auth.slice(7) : "").trim();
   const expectedBuffer = Buffer.from(configured);
   const suppliedBuffer = Buffer.from(supplied);
   return (
@@ -139,7 +139,7 @@ function hasValidAdminToken(req) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!process.env.SPARKDASH_ADMIN_TOKEN) {
+  if (!(process.env.SPARKDASH_ADMIN_TOKEN || "").trim()) {
     return res.status(503).json({ error: "HAProxy administration is disabled: admin token unset" });
   }
   if (!hasValidAdminToken(req)) return res.status(401).json({ error: "Unauthorized" });
@@ -310,7 +310,7 @@ app.put("/api/settings", (req, res) => {
   try {
     const patch = req.body || {};
     if (patch.haproxy != null) {
-      if (!process.env.SPARKDASH_ADMIN_TOKEN) {
+      if (!(process.env.SPARKDASH_ADMIN_TOKEN || "").trim()) {
         return res
           .status(503)
           .json({ error: "HAProxy administration is disabled: admin token unset" });

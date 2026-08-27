@@ -26,6 +26,11 @@ services:
     # Share host PID namespace so nvidia-smi compute-apps sees GPU processes
     # (otherwise local VRAM falls back to minute-old config/gpu-memory.json).
     pid: host
+    env_file:
+      - path: ./config/admin.env
+        required: false
+      - path: .env
+        required: false
     environment:
       - PORT=5555
       - LLM_PORT=8888
@@ -33,7 +38,6 @@ services:
       - HOST_PROC_PATH=/host/proc
       - HOST_SYS_PATH=/host/sys
       - HOST_ROOT_PATH=/host/root
-      - SPARKDASH_ADMIN_TOKEN=${SPARKDASH_ADMIN_TOKEN:-}
     networks:
       - sparkdash-net
 

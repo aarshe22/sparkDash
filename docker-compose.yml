@@ -30,6 +30,11 @@ services:
       - /usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1:/usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1:ro
       # Config + encrypted secrets (passwords survive restarts)
       - ./config:/app/config
+    env_file:
+      - path: ./config/admin.env
+        required: false
+      - path: .env
+        required: false
     environment:
       - PORT=5555
       - LLM_PORT=8888
@@ -37,7 +42,6 @@ services:
       - HOST_PROC_PATH=/host/proc
       - HOST_SYS_PATH=/host/sys
       - HOST_ROOT_PATH=/host/root
-      - SPARKDASH_ADMIN_TOKEN=${SPARKDASH_ADMIN_TOKEN:-}
     networks:
       - sparkdash-net
 
