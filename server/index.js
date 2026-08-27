@@ -26,11 +26,10 @@ import {
   setHaproxyPassword,
 } from "./secretsStore.js";
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
+dotenv.config({ path: path.join(ROOT, ".env") });
 
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
